@@ -624,6 +624,58 @@ class MilvusScan(
     (v1SegmentIDs, v2SegmentIDs)
   }
 
+  /**
+   * Get delete log file paths for a segment
+   * Returns the paths of delta_log files for the segment
+   */
+  def getDeleteLogPaths(
+      fs: FileSystem,
+      client: MilvusClient,
+      collectionID: String,
+      partitionID: String,
+      segmentID: String
+  ): Seq[String] = {
+    try {
+      val segmentIDLong = segmentID.toLong
+      val collectionIDLong = collectionID.toLong
+      val result = client.getSegmentInfo(collectionIDLong, segmentIDLong)
+      if (result.isFailure) {
+        logWarning(s"Failed to get segment info for delete logs: ${result.failed.get.getMessage}")
+        return Seq.empty
+      }
+      val deleteLogIDs = result.get.deleteLogIDs
+      if (deleteLogIDs.isEmpty) {
+        return Seq.empty
+      }
+
+      // Build delete log path: delta_log/collectionID/partitionID/segmentID/
+      val deltaLogPath = readerOption.getFilePath(s"delta_log/$collectionID/$partitionID/$segmentID")
+
+      try {
+        if (!fs.exists(deltaLogPath)) {
+          logInfo(s"Delta log path does not exist: $deltaLogPath")
+          return Seq.empty
+        }
+
+        val deleteFiles = fs.listStatus(deltaLogPath)
+          .filter(status => deleteLogIDs.contains(status.getPath.getName))
+          .map(_.getPath.toString)
+          .toSeq
+
+        logInfo(s"Found ${deleteFiles.size} delete log files for segment $segmentID")
+        deleteFiles
+      } catch {
+        case e: java.io.FileNotFoundException =>
+          logInfo(s"Delta log directory not found for segment $segmentID")
+          Seq.empty
+      }
+    } catch {
+      case e: Exception =>
+        logWarning(s"Error getting delete log paths for segment $segmentID: ${e.getMessage}")
+        Seq.empty
+    }
+  }
+
   def getPartitionInfos(
       client: MilvusClient
   ): Map[String, String] = {
@@ -808,6 +860,10 @@ class MilvusScan(
       fieldMaps(segmentName) = getSegmentFieldMap(fs, client, rootPath)
     }
 
+    // Get primary key field index from collection schema
+    val pkField = collectionInfo.schema.fields.find(_.isPrimaryKey)
+    val pkFieldIndex = pkField.map(f => collectionInfo.schema.fields.indexOf(f) + 2).getOrElse(2) // +2 for row_id and timestamp
+
     // Create V1 input partitions
     val v1Partitions = fieldMaps.map { case (segment, fieldMap) =>
       val partitionName = if (containExtraPartition)
@@ -824,12 +880,26 @@ class MilvusScan(
           logWarning(s"Failed to parse segment '$segment' as Long, using -1")
           -1L
       }
+
+      // Get delete log paths if mergeDeletes is enabled
+      val deleteLogPaths = if (milvusOption.mergeDeletes) {
+        val partitionID = segment2Partition.getOrElse(segment, milvusOption.partitionID)
+        getDeleteLogPaths(fs, client, collection, partitionID, segment)
+      } else {
+        Seq.empty
+      }
+
       MilvusInputPartition(
         fieldMap,
         partitionName,
-        segmentID = segmentIDLong  // Pass segment ID for tracking
+        segmentID = segmentIDLong,
+        deleteLogPaths = deleteLogPaths,
+        pkFieldIndex = pkFieldIndex
       ): InputPartition
     }
+
+    // Get primary key field name for V2 partitions
+    val pkFieldName = pkField.map(_.name).getOrElse("")
 
     // Create V2 input partitions
     val v2Partitions = v2Manifests.map { case (segmentID, (collectionID, partitionID, manifest)) =>
@@ -839,6 +909,14 @@ class MilvusScan(
       } catch {
         case _: NumberFormatException => -1L
       }
+
+      // Get delete log paths if mergeDeletes is enabled
+      val deleteLogPaths = if (milvusOption.mergeDeletes) {
+        getDeleteLogPaths(fs, client, collectionID, partitionID, segmentID)
+      } else {
+        Seq.empty
+      }
+
       MilvusStorageV2InputPartition(
         manifest,
         collectionInfo.schema.toByteArray,
@@ -848,7 +926,9 @@ class MilvusScan(
         vectorSearchConfig.map(_.queryVector),
         vectorSearchConfig.map(_.metricType),
         vectorSearchConfig.map(_.vectorColumn),
-        segmentIDLong  // Pass segment ID
+        segmentIDLong,
+        deleteLogPaths,
+        pkFieldName
       ): InputPartition
     }
 

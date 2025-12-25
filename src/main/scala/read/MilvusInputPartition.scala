@@ -13,13 +13,17 @@ case class MilvusStorageV2InputPartition(
     queryVector: Option[Array[Float]] = None,
     metricType: Option[String] = None,
     vectorColumn: Option[String] = None,
-    segmentID: Long = -1L  // Add segment ID tracking for V2
+    segmentID: Long = -1L,  // Add segment ID tracking for V2
+    deleteLogPaths: Seq[String] = Seq.empty,  // Delete log file paths for merge deletes
+    pkFieldName: String = ""  // Primary key field name
 ) extends InputPartition
 
 // V1 Binlog InputPartition
 case class MilvusInputPartition(
     fieldFiles: Seq[Map[String, String]],
     partition: String = "",
-    segmentID: Long = -1L  // Add segment ID tracking
+    segmentID: Long = -1L,  // Add segment ID tracking
+    deleteLogPaths: Seq[String] = Seq.empty,  // Delete log file paths for merge deletes
+    pkFieldIndex: Int = 2  // Primary key field index in schema (default: 2 for V1 format after row_id, timestamp)
 ) extends InputPartition
 

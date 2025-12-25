@@ -42,7 +42,8 @@ case class MilvusOption(
     fieldIDs: String = "",
     extraColumns: Seq[String] = Seq.empty,
     options: Map[String, String] = Map.empty,
-    vectorSearchConfig: Option[VectorSearchConfig] = None
+    vectorSearchConfig: Option[VectorSearchConfig] = None,
+    mergeDeletes: Boolean = false
 )
 
 object MilvusOption {
@@ -115,6 +116,9 @@ object MilvusOption {
   // Writer config
   val WriterCustomPath = "milvus.writer.customPath"
 
+  // Merge deletes config
+  val MergeDeletes = "milvus.merge.deletes"
+
   // Create MilvusOption from a map
   def apply(options: CaseInsensitiveStringMap): MilvusOption = {
     val uri = options.getOrDefault(MilvusUri, "")
@@ -152,6 +156,9 @@ object MilvusOption {
     // Parse vector search configuration
     val vectorSearchConfig = parseVectorSearchConfig(options)
 
+    // Parse merge deletes option
+    val mergeDeletes = options.getOrDefault(MergeDeletes, "false").toBoolean
+
     MilvusOption(
       uri,
       token,
@@ -173,7 +180,8 @@ object MilvusOption {
       fieldIDs,
       extraColumns,
       optionsMap,
-      vectorSearchConfig
+      vectorSearchConfig,
+      mergeDeletes
     )
   }
 

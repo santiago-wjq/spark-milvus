@@ -46,7 +46,8 @@ object MilvusDataReader {
       // Drop system columns if they exist
       val columnsToDropIfExist = Seq("row_id", "timestamp")
       val existingColumns = insertDF.schema.fieldNames.toSet
-      val actualColumnsToDrop = columnsToDropIfExist.filter(existingColumns.contains)
+      val actualColumnsToDrop =
+        columnsToDropIfExist.filter(existingColumns.contains)
       if (actualColumnsToDrop.nonEmpty) {
         insertDF.drop(actualColumnsToDrop: _*)
       } else {
@@ -57,7 +58,7 @@ object MilvusDataReader {
       // For V1 format, row_id and timestamp columns exist at positions 0 and 1
       // For V2 format, there are no system columns
       val hasSystemColumns = insertDF.schema.fieldNames.contains("row_id") ||
-                             insertDF.schema.fieldNames.contains("timestamp")
+        insertDF.schema.fieldNames.contains("timestamp")
 
       val insertPkColName = if (hasSystemColumns) {
         // V1 format: primary key is at index 2 (after row_id and timestamp)
@@ -91,7 +92,7 @@ object MilvusDataReader {
         insertDF.join(
           deleteDFRenamedWindow,
           (col(insertPkColName) === col("delete_pk")) &&
-          (col("delete_ts") > col("timestamp")),
+            (col("delete_ts") > col("timestamp")),
           "left_anti"
         )
       } else {
@@ -106,7 +107,8 @@ object MilvusDataReader {
       // Drop system columns if they exist
       val columnsToDropIfExist = Seq("row_id", "timestamp")
       val existingColumns = finalInsertDFWindow.schema.fieldNames.toSet
-      val actualColumnsToDrop = columnsToDropIfExist.filter(existingColumns.contains)
+      val actualColumnsToDrop =
+        columnsToDropIfExist.filter(existingColumns.contains)
       if (actualColumnsToDrop.nonEmpty) {
         finalInsertDFWindow.drop(actualColumnsToDrop: _*)
       } else {

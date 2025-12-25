@@ -38,9 +38,64 @@ class MilvusPartitionReader(
     partition: String,
     options: MilvusS3Option,
     pushedFilters: Array[Filter] = Array.empty[Filter],
-    segmentID: Long = -1L  // Add segment ID parameter
+    segmentID: Long = -1L,  // Add segment ID parameter
+    deleteLogPaths: Seq[String] = Seq.empty,  // Delete log file paths
+    pkFieldIndex: Int = 2  // Primary key field index (default: 2 for V1 format)
 ) extends PartitionReader[InternalRow]
     with Logging {
+
+  // Set of deleted primary keys (loaded from delete logs)
+  private lazy val deletedPKs: Set[Any] = loadDeletedPKs()
+
+  /**
+   * Load deleted primary keys from delete log files
+   */
+  private def loadDeletedPKs(): Set[Any] = {
+    if (deleteLogPaths.isEmpty) {
+      logInfo(s"No delete logs to load for segment $segmentID")
+      return Set.empty
+    }
+
+    logInfo(s"Loading deleted PKs from ${deleteLogPaths.size} delete log files for segment $segmentID")
+    val deletedSet = scala.collection.mutable.Set[Any]()
+    val objectMapper = LogReader.getObjectMapper()
+
+    deleteLogPaths.foreach { filePath =>
+      var inputStream: java.io.InputStream = null
+      var fileSystem: FileSystem = null
+      try {
+        val path = options.getFilePath(filePath)
+        fileSystem = options.getFileSystem(path)
+        inputStream = fileSystem.open(path)
+
+        // Read descriptor event to get data type
+        val descriptorEvent = LogReader.readDescriptorEvent(inputStream)
+        val dataType = descriptorEvent.data.payloadDataType
+
+        // Read delete events
+        var deleteEvent = LogReader.readDeleteEvent(inputStream, objectMapper, dataType)
+        while (deleteEvent != null) {
+          deleteEvent.pks.foreach { pk =>
+            deletedSet += pk
+          }
+          deleteEvent = LogReader.readDeleteEvent(inputStream, objectMapper, dataType)
+        }
+      } catch {
+        case e: Exception =>
+          logWarning(s"Error reading delete log $filePath: ${e.getMessage}")
+      } finally {
+        if (inputStream != null) {
+          try { inputStream.close() } catch { case _: Exception => }
+        }
+        if (fileSystem != null) {
+          try { fileSystem.close() } catch { case _: Exception => }
+        }
+      }
+    }
+
+    logInfo(s"Loaded ${deletedSet.size} deleted PKs for segment $segmentID")
+    deletedSet.toSet
+  }
 
   @volatile private var fieldFileReaders: Map[String, FieldFileReader] =
     Map.empty
@@ -452,13 +507,21 @@ class MilvusPartitionReader(
 
       hasNext = allHaveNext
 
-      // If we have a next record, check if it passes the filters
+      // If we have a next record, check if it passes the filters and is not deleted
       if (hasNext) {
         val row = buildCurrentRow()
-        if (applyFilters(row)) {
-          return true // Found a row that passes the filters
+        val passesFilters = applyFilters(row)
+        val isDeleted = if (deletedPKs.nonEmpty && pkFieldIndex < row.numFields) {
+          val pkValue = getPKValue(row, pkFieldIndex)
+          deletedPKs.contains(pkValue)
+        } else {
+          false
         }
-        // If the row doesn't pass the filters, move to next record and continue
+
+        if (passesFilters && !isDeleted) {
+          return true // Found a row that passes the filters and is not deleted
+        }
+        // If the row doesn't pass the filters or is deleted, move to next record and continue
         currentFieldReaders.values.foreach { reader =>
           reader.moveToNextRecord()
         }
@@ -850,6 +913,23 @@ class MilvusPartitionReader(
     }
 
     row // Return the populated row
+  }
+
+  /**
+   * Extract primary key value from a row
+   */
+  private def getPKValue(row: InternalRow, pkIndex: Int): Any = {
+    if (row.isNullAt(pkIndex)) {
+      return null
+    }
+
+    val field = schema.fields(pkIndex)
+    field.dataType match {
+      case SparkDataTypes.LongType => row.getLong(pkIndex)
+      case SparkDataTypes.IntegerType => row.getInt(pkIndex)
+      case SparkDataTypes.StringType => row.getUTF8String(pkIndex).toString
+      case _ => row.get(pkIndex, field.dataType)
+    }
   }
 
   private def applyFilters(row: InternalRow): Boolean = {
