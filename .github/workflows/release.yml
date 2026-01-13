@@ -1,0 +1,106 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          target: builder
+          load: true
+          tags: spark-milvus-release:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run unit tests
+        run: |
+          docker run --rm spark-milvus-release:latest bash -c "
+            source \$SDKMAN_DIR/bin/sdkman-init.sh && \
+            sbt 'testOnly \
+              com.zilliz.spark.connector.MilvusOptionTest \
+              com.zilliz.spark.connector.MilvusS3OptionTest \
+              com.zilliz.spark.connector.DataTypeUtilTest \
+              com.zilliz.spark.connector.filter.VectorBruteForceSearchTest \
+              com.zilliz.spark.connector.operations.backfill.BackfillConfigTest \
+              com.zilliz.spark.connector.loon.PropertiesTest \
+              serde.SchemaUtilTest'
+          "
+
+      - name: Build assembly JAR
+        run: |
+          mkdir -p dist
+          docker run --rm -v $(pwd)/dist:/dist spark-milvus-release:latest bash -c "
+            source \$SDKMAN_DIR/bin/sdkman-init.sh && \
+            sbt assembly && \
+            cp target/scala-2.13/*.jar /dist/
+          "
+
+      - name: Extract native libraries
+        run: |
+          docker create --name extract spark-milvus-release:latest
+          docker cp extract:/workspace/src/main/resources/native/ ./dist/native/ || true
+          docker rm extract
+
+      - name: Create release archive
+        run: |
+          cd dist
+          VERSION=${{ github.event.release.tag_name }}
+          tar -czvf spark-milvus-${VERSION}.tar.gz *.jar native/
+          zip -r spark-milvus-${VERSION}.zip *.jar native/
+
+      - name: Upload release assets to GitHub
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            dist/spark-milvus-*.tar.gz
+            dist/spark-milvus-*.zip
+            dist/*.jar
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish to Maven Central
+        env:
+          SONATYPE_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
+          SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
+          PGP_PASSPHRASE: ${{ secrets.PGP_PASSPHRASE }}
+          PGP_SECRET: ${{ secrets.PGP_SECRET }}
+        run: |
+          # Create Sonatype credentials file
+          mkdir -p ~/.sbt
+          cat > ~/.sbt/sonatype_central_credentials << EOF
+          host=central.sonatype.com
+          user=$SONATYPE_USERNAME
+          password=$SONATYPE_PASSWORD
+          EOF
+
+          # Import GPG key for signing
+          echo "$PGP_SECRET" | base64 -d | gpg --batch --import
+
+          # Publish to Maven Central
+          docker run --rm \
+            -v ~/.sbt:/root/.sbt \
+            -v ~/.gnupg:/root/.gnupg \
+            -e PGP_PASSPHRASE="$PGP_PASSPHRASE" \
+            spark-milvus-release:latest bash -c "
+              source \$SDKMAN_DIR/bin/sdkman-init.sh && \
+              sbt 'set version := \"${{ github.event.release.tag_name }}\"' publishSigned sonatypeCentralRelease
+            "
