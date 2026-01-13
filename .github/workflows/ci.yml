@@ -8,8 +8,17 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: amd64
+            cmake_arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            cmake_arch: aarch64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     container:
       image: spark:4.0.1-scala2.13-java21-python3-ubuntu
       options: --user root
@@ -30,7 +39,7 @@ jobs:
         run: |
           echo "commit=$(git -C milvus-storage rev-parse HEAD)" >> $GITHUB_OUTPUT
 
-      # 缓存 native library 编译产物
+      # 缓存 native library 编译产物 (按架构区分)
       - name: Cache native library build
         id: cache-native
         uses: actions/cache@v4
@@ -38,7 +47,7 @@ jobs:
           path: |
             milvus-storage/cpp/build
             milvus-storage/java/native
-          key: native-${{ steps.milvus-storage.outputs.commit }}
+          key: native-${{ matrix.arch }}-${{ steps.milvus-storage.outputs.commit }}
 
       # 以下缓存仅在需要编译时使用
       - name: Cache Conan packages
@@ -46,18 +55,18 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /root/.conan
-          key: conan-${{ steps.milvus-storage.outputs.commit }}
+          key: conan-${{ matrix.arch }}-${{ steps.milvus-storage.outputs.commit }}
           restore-keys: |
-            conan-
+            conan-${{ matrix.arch }}-
 
       - name: Cache ccache
         if: steps.cache-native.outputs.cache-hit != 'true'
         uses: actions/cache@v4
         with:
           path: /root/.ccache
-          key: ccache-${{ steps.milvus-storage.outputs.commit }}
+          key: ccache-${{ matrix.arch }}-${{ steps.milvus-storage.outputs.commit }}
           restore-keys: |
-            ccache-
+            ccache-${{ matrix.arch }}-
 
       - name: Cache sbt dependencies
         uses: actions/cache@v4
@@ -66,9 +75,9 @@ jobs:
             /root/.sbt
             /root/.ivy2/cache
             /root/.cache/coursier
-          key: sbt-${{ hashFiles('build.sbt', 'project/*.sbt', 'project/*.scala') }}
+          key: sbt-${{ matrix.arch }}-${{ hashFiles('build.sbt', 'project/*.sbt', 'project/*.scala') }}
           restore-keys: |
-            sbt-
+            sbt-${{ matrix.arch }}-
 
       - name: Install build dependencies
         if: steps.cache-native.outputs.cache-hit != 'true'
@@ -78,12 +87,12 @@ jobs:
       - name: Install CMake
         if: steps.cache-native.outputs.cache-hit != 'true'
         run: |
-          wget -qO- "https://cmake.org/files/v3.27/cmake-3.27.5-linux-x86_64.tar.gz" | tar --strip-components=1 -xz -C /usr/local
+          wget -qO- "https://cmake.org/files/v3.27/cmake-3.27.5-linux-${{ matrix.cmake_arch }}.tar.gz" | tar --strip-components=1 -xz -C /usr/local
 
       - name: Install sbt
         run: |
           curl -fL https://github.com/sbt/sbt/releases/download/v1.11.1/sbt-1.11.1.tgz | tar xz -C /usr/local
-          ln -s /usr/local/sbt/bin/sbt /usr/local/bin/sbt
+          ln -sf /usr/local/sbt/bin/sbt /usr/local/bin/sbt
 
       - name: Install Conan
         if: steps.cache-native.outputs.cache-hit != 'true'
