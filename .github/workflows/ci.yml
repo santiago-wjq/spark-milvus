@@ -30,15 +30,7 @@ jobs:
         run: |
           echo "commit=$(git -C milvus-storage rev-parse HEAD)" >> $GITHUB_OUTPUT
 
-      # 缓存步骤放在安装之前
-      - name: Cache Conan packages
-        uses: actions/cache@v4
-        with:
-          path: /root/.conan
-          key: conan-${{ steps.milvus-storage.outputs.commit }}
-          restore-keys: |
-            conan-
-
+      # 缓存 native library 编译产物
       - name: Cache native library build
         id: cache-native
         uses: actions/cache@v4
@@ -47,6 +39,16 @@ jobs:
             milvus-storage/cpp/build
             milvus-storage/java/native
           key: native-${{ steps.milvus-storage.outputs.commit }}
+
+      # 以下缓存仅在需要编译时使用
+      - name: Cache Conan packages
+        if: steps.cache-native.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: /root/.conan
+          key: conan-${{ steps.milvus-storage.outputs.commit }}
+          restore-keys: |
+            conan-
 
       - name: Cache ccache
         if: steps.cache-native.outputs.cache-hit != 'true'
@@ -96,14 +98,15 @@ jobs:
         run: |
           cd milvus-storage/cpp
           make build USE_JNI=True WITH_UT=False USE_ASAN=False
+          mkdir -p ../java/native
+          cp build/Release/libmilvus-storage.so ../java/native/
+          cp build/Release/libmilvus-storage-jni.so ../java/native/
 
       - name: Copy native libraries
         run: |
-          mkdir -p milvus-storage/java/native src/main/resources/native
-          cp milvus-storage/cpp/build/Release/libmilvus-storage.so milvus-storage/java/native/
-          cp milvus-storage/cpp/build/Release/libmilvus-storage-jni.so milvus-storage/java/native/
-          cp milvus-storage/cpp/build/Release/libmilvus-storage.so src/main/resources/native/
-          cp milvus-storage/cpp/build/Release/libmilvus-storage-jni.so src/main/resources/native/
+          mkdir -p src/main/resources/native
+          cp milvus-storage/java/native/libmilvus-storage.so src/main/resources/native/
+          cp milvus-storage/java/native/libmilvus-storage-jni.so src/main/resources/native/
 
       - name: Publish milvus-storage Java binding locally
         run: |
