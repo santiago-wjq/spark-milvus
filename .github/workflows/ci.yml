@@ -25,20 +25,35 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Get milvus-storage commit ID
+        id: milvus-storage
+        run: |
+          echo "commit=$(git -C milvus-storage rev-parse HEAD)" >> $GITHUB_OUTPUT
+
       # 缓存步骤放在安装之前
       - name: Cache Conan packages
         uses: actions/cache@v4
         with:
           path: /root/.conan
-          key: conan-${{ hashFiles('milvus-storage/cpp/conanfile.py') }}
+          key: conan-${{ steps.milvus-storage.outputs.commit }}
           restore-keys: |
             conan-
 
+      - name: Cache native library build
+        id: cache-native
+        uses: actions/cache@v4
+        with:
+          path: |
+            milvus-storage/cpp/build
+            milvus-storage/java/native
+          key: native-${{ steps.milvus-storage.outputs.commit }}
+
       - name: Cache ccache
+        if: steps.cache-native.outputs.cache-hit != 'true'
         uses: actions/cache@v4
         with:
           path: /root/.ccache
-          key: ccache-${{ github.sha }}
+          key: ccache-${{ steps.milvus-storage.outputs.commit }}
           restore-keys: |
             ccache-
 
@@ -54,10 +69,12 @@ jobs:
             sbt-
 
       - name: Install build dependencies
+        if: steps.cache-native.outputs.cache-hit != 'true'
         run: |
           apt-get install -y g++ gcc make ccache automake autoconf libtool curl wget
 
       - name: Install CMake
+        if: steps.cache-native.outputs.cache-hit != 'true'
         run: |
           wget -qO- "https://cmake.org/files/v3.27/cmake-3.27.5-linux-x86_64.tar.gz" | tar --strip-components=1 -xz -C /usr/local
 
@@ -67,6 +84,7 @@ jobs:
           ln -s /usr/local/sbt/bin/sbt /usr/local/bin/sbt
 
       - name: Install Conan
+        if: steps.cache-native.outputs.cache-hit != 'true'
         run: |
           pip3 install conan==1.61.0
           conan profile new default --detect || true
@@ -74,6 +92,7 @@ jobs:
           conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert || true
 
       - name: Build milvus-storage native library
+        if: steps.cache-native.outputs.cache-hit != 'true'
         run: |
           cd milvus-storage/cpp
           make build USE_JNI=True WITH_UT=False USE_ASAN=False
