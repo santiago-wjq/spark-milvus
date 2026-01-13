@@ -8,17 +8,10 @@ on:
 
 jobs:
   build-and-test:
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            arch: amd64
-            cmake_arch: x86_64
-          - os: ubuntu-24.04-arm
-            arch: arm64
-            cmake_arch: aarch64
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    # TODO: Add ARM64 support after milvus-storage updates google-cloud-cpp dependency
+    # ARM64 build fails due to crc32c/1.1.1 compilation error with newer GCC
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     container:
       image: spark:4.0.1-scala2.13-java21-python3-ubuntu
       options: --user root
@@ -57,8 +50,7 @@ jobs:
           path: /root/.conan
           key: conan-${{ matrix.arch }}-${{ steps.milvus-storage.outputs.commit }}
           restore-keys: |
-            conan-${{ matrix.arch }}-
-
+            conan-
       - name: Cache ccache
         if: steps.cache-native.outputs.cache-hit != 'true'
         uses: actions/cache@v4
@@ -66,8 +58,7 @@ jobs:
           path: /root/.ccache
           key: ccache-${{ matrix.arch }}-${{ steps.milvus-storage.outputs.commit }}
           restore-keys: |
-            ccache-${{ matrix.arch }}-
-
+            ccache-
       - name: Cache sbt dependencies
         uses: actions/cache@v4
         with:
@@ -77,8 +68,7 @@ jobs:
             /root/.cache/coursier
           key: sbt-${{ matrix.arch }}-${{ hashFiles('build.sbt', 'project/*.sbt', 'project/*.scala') }}
           restore-keys: |
-            sbt-${{ matrix.arch }}-
-
+            sbt-
       - name: Install build dependencies
         if: steps.cache-native.outputs.cache-hit != 'true'
         run: |
@@ -87,7 +77,7 @@ jobs:
       - name: Install CMake
         if: steps.cache-native.outputs.cache-hit != 'true'
         run: |
-          wget -qO- "https://cmake.org/files/v3.27/cmake-3.27.5-linux-${{ matrix.cmake_arch }}.tar.gz" | tar --strip-components=1 -xz -C /usr/local
+          wget -qO- "https://cmake.org/files/v3.27/cmake-3.27.5-linux-x86_64.tar.gz" | tar --strip-components=1 -xz -C /usr/local
 
       - name: Install sbt
         run: |
