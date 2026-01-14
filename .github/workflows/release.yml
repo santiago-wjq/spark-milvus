@@ -19,7 +19,7 @@ jobs:
       - name: Install Git
         run: |
           apt-get update
-          apt-get install -y git gnupg
+          apt-get install -y git gnupg zip
 
       - name: Checkout repository
         uses: actions/checkout@v4
