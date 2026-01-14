@@ -172,4 +172,5 @@ jobs:
           PGP_PASSPHRASE: ${{ secrets.PGP_PASSPHRASE }}
         run: |
           VERSION=${{ github.event.release.tag_name }}
-          sbt "set version := \"${VERSION#v}\"" publishSigned sonatypeCentralRelease
+          # Use semicolons to ensure version setting is in same session
+          sbt "; set version := \"${VERSION#v}\"; publishSigned; sonatypeBundleRelease"
