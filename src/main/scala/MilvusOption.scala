@@ -261,29 +261,34 @@ case class MilvusS3Option(
       conf.set("fs.s3a.path.style.access", s3PathStyleAccess.toString)
       conf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
 
-      // Apply Spark's hadoop configuration first (from spark.hadoop.fs.s3a.*)
-      // This allows users to configure AssumedRoleCredentialProvider via spark.hadoop.*
-      sparkHadoopS3Conf.foreach { case (key, value) =>
-        conf.set(key, value)
-      }
-
-      // Only set credentials if not already configured via spark.hadoop.*
-      if (conf.get("fs.s3a.aws.credentials.provider") == null) {
-        if (notEmpty(s3AccessKey) && notEmpty(s3SecretKey)) {
-          // Use explicit credentials when provided via options
-          conf.set(
-            "fs.s3a.aws.credentials.provider",
-            "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider,com.amazonaws.auth.DefaultAWSCredentialsProviderChain"
-          )
-          conf.set("fs.s3a.access.key", s3AccessKey)
-          conf.set("fs.s3a.secret.key", s3SecretKey)
-        } else {
-          // Use DefaultAWSCredentialsProviderChain for IAM role / Assume Role / env vars
+      // Credentials priority: AK/SK options > spark.hadoop.* > DefaultAWSCredentialsProviderChain
+      if (notEmpty(s3AccessKey) && notEmpty(s3SecretKey)) {
+        // Priority 1: Use explicit AK/SK credentials when provided via options
+        conf.set(
+          "fs.s3a.aws.credentials.provider",
+          "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider,com.amazonaws.auth.DefaultAWSCredentialsProviderChain"
+        )
+        conf.set("fs.s3a.access.key", s3AccessKey)
+        conf.set("fs.s3a.secret.key", s3SecretKey)
+      } else if (sparkHadoopS3Conf.nonEmpty) {
+        // Priority 2: Use Spark's hadoop configuration (spark.hadoop.fs.s3a.*)
+        // This allows users to configure AssumedRoleCredentialProvider via spark.hadoop.*
+        sparkHadoopS3Conf.foreach { case (key, value) =>
+          conf.set(key, value)
+        }
+        // Set default provider if not configured in spark.hadoop.*
+        if (conf.get("fs.s3a.aws.credentials.provider") == null) {
           conf.set(
             "fs.s3a.aws.credentials.provider",
             "com.amazonaws.auth.DefaultAWSCredentialsProviderChain"
           )
         }
+      } else {
+        // Priority 3: Use DefaultAWSCredentialsProviderChain for IAM role / env vars
+        conf.set(
+          "fs.s3a.aws.credentials.provider",
+          "com.amazonaws.auth.DefaultAWSCredentialsProviderChain"
+        )
       }
 
       conf.set("fs.s3a.connection.ssl.enabled", s3UseSSL.toString)
