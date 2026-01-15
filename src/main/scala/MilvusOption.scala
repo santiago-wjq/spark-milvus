@@ -248,7 +248,8 @@ case class MilvusS3Option(
     s3PathStyleAccess: Boolean,
     milvusPKType: String,
     s3MaxConnections: Int,
-    s3PreloadPoolSize: Int
+    s3PreloadPoolSize: Int,
+    sparkHadoopS3Conf: Map[String, String] = Map.empty  // Spark's fs.s3a.* configs
 ) extends Serializable {
   def notEmpty(str: String): Boolean = str != null && str.trim.nonEmpty
 
@@ -259,12 +260,32 @@ case class MilvusS3Option(
       conf.set("fs.s3a.endpoint", s3Endpoint)
       conf.set("fs.s3a.path.style.access", s3PathStyleAccess.toString)
       conf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
-      conf.set(
-        "fs.s3a.aws.credentials.provider",
-        "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider,com.amazonaws.auth.DefaultAWSCredentialsProviderChain"
-      )
-      conf.set("fs.s3a.access.key", s3AccessKey)
-      conf.set("fs.s3a.secret.key", s3SecretKey)
+
+      // Apply Spark's hadoop configuration first (from spark.hadoop.fs.s3a.*)
+      // This allows users to configure AssumedRoleCredentialProvider via spark.hadoop.*
+      sparkHadoopS3Conf.foreach { case (key, value) =>
+        conf.set(key, value)
+      }
+
+      // Only set credentials if not already configured via spark.hadoop.*
+      if (conf.get("fs.s3a.aws.credentials.provider") == null) {
+        if (notEmpty(s3AccessKey) && notEmpty(s3SecretKey)) {
+          // Use explicit credentials when provided via options
+          conf.set(
+            "fs.s3a.aws.credentials.provider",
+            "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider,com.amazonaws.auth.DefaultAWSCredentialsProviderChain"
+          )
+          conf.set("fs.s3a.access.key", s3AccessKey)
+          conf.set("fs.s3a.secret.key", s3SecretKey)
+        } else {
+          // Use DefaultAWSCredentialsProviderChain for IAM role / Assume Role / env vars
+          conf.set(
+            "fs.s3a.aws.credentials.provider",
+            "com.amazonaws.auth.DefaultAWSCredentialsProviderChain"
+          )
+        }
+      }
+
       conf.set("fs.s3a.connection.ssl.enabled", s3UseSSL.toString)
 
       // Performance optimization settings
@@ -326,19 +347,34 @@ case class MilvusS3Option(
 
 object MilvusS3Option {
   def apply(options: CaseInsensitiveStringMap): MilvusS3Option = {
+    // Extract fs.s3a.* configs from Spark's hadoop configuration
+    // This allows users to configure credentials via spark.hadoop.fs.s3a.*
+    val sparkHadoopS3Conf: Map[String, String] = try {
+      val spark = org.apache.spark.sql.SparkSession.active
+      val hadoopConf = spark.sparkContext.hadoopConfiguration
+      import scala.collection.JavaConverters._
+      hadoopConf.iterator().asScala
+        .filter(entry => entry.getKey.startsWith("fs.s3a."))
+        .map(entry => entry.getKey -> entry.getValue)
+        .toMap
+    } catch {
+      case _: Exception => Map.empty[String, String]
+    }
+
     new MilvusS3Option(
       options.get(Constants.LogReaderTypeParamName),
       options.get(Constants.S3FileSystemTypeName),
       options.getOrDefault(Constants.S3BucketName, "a-bucket"),
       options.getOrDefault(Constants.S3RootPath, "files"),
       options.getOrDefault(Constants.S3Endpoint, "localhost:9000"),
-      options.getOrDefault(Constants.S3AccessKey, "minioadmin"),
-      options.getOrDefault(Constants.S3SecretKey, "minioadmin"),
+      options.getOrDefault(Constants.S3AccessKey, ""),  // Empty default for IAM/AssumeRole support
+      options.getOrDefault(Constants.S3SecretKey, ""),  // Empty default for IAM/AssumeRole support
       options.getOrDefault(Constants.S3UseSSL, "false").toBoolean,
       options.getOrDefault(Constants.S3PathStyleAccess, "true").toBoolean,
       options.getOrDefault(MilvusOption.MilvusCollectionPKType, ""),
       options.getOrDefault(Constants.S3MaxConnections, "32").toInt,
-      options.getOrDefault(Constants.S3PreloadPoolSize, "4").toInt
+      options.getOrDefault(Constants.S3PreloadPoolSize, "4").toInt,
+      sparkHadoopS3Conf
     )
   }
 }
