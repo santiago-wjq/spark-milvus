@@ -120,11 +120,15 @@ COPY --from=builder /workspace/project/ /workspace/project/
 COPY --from=builder /workspace/target/ /workspace/target/
 COPY --from=builder /root/.ivy2/local /root/.ivy2/local
 
-ARG PUBLISH_TO_CENTRAL=true
+ARG PUBLISH_TO_NEXUS=true
+ARG NEXUS_USER=""
+ARG NEXUS_PASSWORD=""
+ENV NEXUS_USER=${NEXUS_USER}
+ENV NEXUS_PASSWORD=${NEXUS_PASSWORD}
 ENV SBT_OPTS="-Xmx4g -Xms2g"
 RUN --mount=type=cache,target=/root/.sbt \
-    if [ "$PUBLISH_TO_CENTRAL" = "true" ]; then \
-        bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sbt publish sonatypeCentralUpload"; \
+    if [ "$PUBLISH_TO_NEXUS" = "true" ]; then \
+        bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sbt publish"; \
     fi
 
 CMD ["/bin/bash"]

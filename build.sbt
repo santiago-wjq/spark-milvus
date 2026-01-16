@@ -1,31 +1,15 @@
 import scala.sys.process.Process
 import scala.io.Source
 
-import xerial.sbt.Sonatype._
-
-ThisBuild / sonatypeCredentialHost := sonatypeCentralHost
 import Dependencies._
 
-// Load Sonatype Central credentials
-credentials += {
-  val credFile = Path.userHome / ".sbt" / "sonatype_central_credentials"
-  if (credFile.exists) {
-    val lines = Source.fromFile(credFile).getLines().toList
-    val props = lines.map { line =>
-      val parts = line.split("=", 2)
-      if (parts.length == 2) Some(parts(0).trim -> parts(1).trim) else None
-    }.flatten.toMap
-
-    Credentials(
-      "Sonatype Nexus Repository Manager",
-      props.getOrElse("host", "central.sonatype.com"),
-      props.getOrElse("user", ""),
-      props.getOrElse("password", "")
-    )
-  } else {
-    Credentials(Path.userHome / ".sbt" / "sonatype.credentials")
-  }
-}
+// Nexus credentials from environment variables
+credentials += Credentials(
+  "Sonatype Nexus Repository Manager",
+  "nexus.zilliz.cc",
+  sys.env.getOrElse("NEXUS_USER", ""),
+  sys.env.getOrElse("NEXUS_PASSWORD", "")
+)
 
 ThisBuild / organizationName := "zilliz"
 ThisBuild / organizationHomepage := Some(url("https://zilliz.com/"))
@@ -39,8 +23,14 @@ ThisBuild / versionScheme := Some("early-semver")
 ThisBuild / pomIncludeRepository := { _ => false }
 ThisBuild / publishMavenStyle := true
 
-// For Sonatype Central, use sonatypePublishToBundle for bundle publishing
-ThisBuild / publishTo := sonatypePublishToBundle.value
+// Publish to internal Nexus repository
+ThisBuild / publishTo := {
+  val nexus = "https://nexus.zilliz.cc/repository/"
+  if (isSnapshot.value)
+    Some("nexus-snapshots" at nexus + "maven-snapshots/")
+  else
+    Some("nexus-releases" at nexus + "maven-releases/")
+}
 
 ThisBuild / licenses := List(
   "Server Side Public License v1" -> new URL(
@@ -89,14 +79,12 @@ lazy val root = (project in file("."))
     assembly / parallelExecution := true,
     Test / parallelExecution := true,
     Compile / compile / parallelExecution := true,
-    version := s"0.1.0-${gitBranch}-${arch}",  // Release version with semver prefix
+    version := s"0.1.0-${gitBranch}-${arch}-SNAPSHOT",  // SNAPSHOT version for Nexus
     organization := "com.zilliz",
 
-    // Enable sources jar for Maven Central publishing (required)
-    Compile / packageSrc / publishArtifact := true,
-    // Generate empty javadoc JAR (Scaladoc fails on generated protobuf code)
-    Compile / packageDoc / publishArtifact := true,
-    Compile / doc / sources := Seq.empty,
+    // Disable Scaladoc and sources jar for publish (not needed for internal Nexus, speeds up build)
+    Compile / packageDoc / publishArtifact := false,
+    Compile / packageSrc / publishArtifact := false,
 
     // Fork JVM for run and tests to properly load native libraries
     run / fork := true,
