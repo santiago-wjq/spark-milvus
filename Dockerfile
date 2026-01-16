@@ -78,57 +78,13 @@ RUN --mount=type=cache,target=/root/.ivy2 \
     --mount=type=cache,target=/root/.sbt \
     cd milvus-storage/java && bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sbt publishLocal"
 
-# Build spark-milvus connector with assembly JAR (with cache)
+# Build spark-milvus connector with assembly JAR and publish (with cache)
+ARG PUBLISH_TO_CENTRAL=true
 ENV GIT_BRANCH=${GIT_BRANCH}
 ENV SBT_OPTS="-Xmx4g -Xms2g"
 RUN --mount=type=cache,target=/root/.ivy2 \
     --mount=type=cache,target=/root/.sbt \
-    bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sbt assembly"
-
-# Stage 2: Final image (only copy artifacts and publish)
-FROM spark:4.0.1-scala2.13-java21-python3-ubuntu AS final
-
-ARG GIT_BRANCH
-ENV GIT_BRANCH=${GIT_BRANCH}
-
-USER root
-
-ENV DEBIAN_FRONTEND=noninteractive
-ENV TZ=UTC
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl zip unzip \
-    && rm -rf /var/lib/apt/lists/*
-
-# Use Java 21 from base image, install Scala/sbt via SDKMAN
-ENV SDKMAN_DIR=/root/.sdkman
-RUN curl -s "https://get.sdkman.io" | bash
-RUN bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && \
-    sdk install scala 2.13.16 && \
-    sdk install sbt 1.11.1"
-
-# JAVA_HOME is already set in base image (java21)
-ENV SCALA_HOME=/root/.sdkman/candidates/scala/current
-ENV SBT_HOME=/root/.sdkman/candidates/sbt/current
-ENV PATH=$SCALA_HOME/bin:$SBT_HOME/bin:$PATH
-
-WORKDIR /workspace
-
-# Copy only necessary files for sbt publish (not entire workspace)
-COPY --from=builder /workspace/build.sbt /workspace/build.sbt
-COPY --from=builder /workspace/project/ /workspace/project/
-COPY --from=builder /workspace/target/ /workspace/target/
-COPY --from=builder /root/.ivy2/local /root/.ivy2/local
-
-ARG PUBLISH_TO_NEXUS=true
-ARG NEXUS_USER=""
-ARG NEXUS_PASSWORD=""
-ENV NEXUS_USER=${NEXUS_USER}
-ENV NEXUS_PASSWORD=${NEXUS_PASSWORD}
-ENV SBT_OPTS="-Xmx4g -Xms2g"
-RUN --mount=type=cache,target=/root/.sbt \
-    if [ "$PUBLISH_TO_NEXUS" = "true" ]; then \
-        bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sbt publish"; \
-    fi
+    bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sbt assembly && \
+        if [ \"$PUBLISH_TO_CENTRAL\" = \"true\" ]; then sbt publish; fi"
 
 CMD ["/bin/bash"]
