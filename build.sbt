@@ -89,7 +89,7 @@ lazy val root = (project in file("."))
     assembly / parallelExecution := true,
     Test / parallelExecution := true,
     Compile / compile / parallelExecution := true,
-    version := s"${gitBranch}-${arch}",  // Release version (no SNAPSHOT)
+    version := s"0.1.0-${gitBranch}-${arch}",  // Release version with semver prefix
     organization := "com.zilliz",
 
     // Enable sources jar for Maven Central publishing (required)
