@@ -39,12 +39,8 @@ ThisBuild / versionScheme := Some("early-semver")
 ThisBuild / pomIncludeRepository := { _ => false }
 ThisBuild / publishMavenStyle := true
 
-ThisBuild / publishTo := {
-  val centralSnapshots =
-    "https://central.sonatype.com/repository/maven-snapshots/"
-  if (isSnapshot.value) Some("central-snapshots" at centralSnapshots)
-  else localStaging.value
-}
+// For Sonatype Central, use sonatypeCentralHost and let sbt-sonatype handle publishing
+ThisBuild / publishTo := sonatypeCentralHost
 
 ThisBuild / licenses := List(
   "Server Side Public License v1" -> new URL(
