@@ -124,7 +124,7 @@ ARG PUBLISH_TO_CENTRAL=true
 ENV SBT_OPTS="-Xmx4g -Xms2g"
 RUN --mount=type=cache,target=/root/.sbt \
     if [ "$PUBLISH_TO_CENTRAL" = "true" ]; then \
-        bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sbt publish"; \
+        bash -c "source $SDKMAN_DIR/bin/sdkman-init.sh && sbt publish sonatypeBundleRelease"; \
     fi
 
 CMD ["/bin/bash"]
