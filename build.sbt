@@ -92,9 +92,9 @@ lazy val root = (project in file("."))
     version := s"${gitBranch}-${arch}",  // Release version (no SNAPSHOT)
     organization := "com.zilliz",
 
-    // Disable Scaladoc and sources jar for publish (not needed, speeds up build)
-    Compile / packageDoc / publishArtifact := false,
-    Compile / packageSrc / publishArtifact := false,
+    // Enable Scaladoc and sources jar for Maven Central publishing (required)
+    Compile / packageDoc / publishArtifact := true,
+    Compile / packageSrc / publishArtifact := true,
 
     // Fork JVM for run and tests to properly load native libraries
     run / fork := true,
