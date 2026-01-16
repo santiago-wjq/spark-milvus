@@ -39,8 +39,8 @@ ThisBuild / versionScheme := Some("early-semver")
 ThisBuild / pomIncludeRepository := { _ => false }
 ThisBuild / publishMavenStyle := true
 
-// For Sonatype Central, use sonatypeCentralHost and let sbt-sonatype handle publishing
-ThisBuild / publishTo := sonatypeCentralHost
+// For Sonatype Central, use sonatypePublishToBundle for bundle publishing
+ThisBuild / publishTo := sonatypePublishToBundle.value
 
 ThisBuild / licenses := List(
   "Server Side Public License v1" -> new URL(
