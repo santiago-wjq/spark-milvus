@@ -3,13 +3,20 @@ import scala.io.Source
 
 import Dependencies._
 
-// Nexus credentials from environment variables
-credentials += Credentials(
-  "Sonatype Nexus Repository Manager",
-  "nexus.zilliz.cc",
-  sys.env.getOrElse("NEXUS_USER", ""),
-  sys.env.getOrElse("NEXUS_PASSWORD", "")
-)
+// Load Zilliz Nexus credentials
+credentials += {
+  val credFile = List(
+    Path.userHome / ".sbt" / "zilliz_nexus_credentials",
+    file(".sbt/zilliz_nexus_credentials")
+  ).find(_.exists)
+    .getOrElse(Path.userHome / ".sbt" / "zilliz_nexus_credentials")
+
+  if (credFile.exists) {
+    Credentials(credFile)
+  } else {
+    Credentials(Path.userHome / ".sbt" / "sonatype.credentials")
+  }
+}
 
 ThisBuild / organizationName := "zilliz"
 ThisBuild / organizationHomepage := Some(url("https://zilliz.com/"))
@@ -25,11 +32,10 @@ ThisBuild / publishMavenStyle := true
 
 // Publish to internal Nexus repository
 ThisBuild / publishTo := {
-  val nexus = "https://nexus.zilliz.cc/repository/"
+  val nexusSnapshots = "https://nexus.zilliz.cc/repository/maven-snapshots"
   if (isSnapshot.value)
-    Some("nexus-snapshots" at nexus + "maven-snapshots/")
-  else
-    Some("nexus-releases" at nexus + "maven-releases/")
+    Some("Sonatype Nexus Repository Manager" at nexusSnapshots)
+  else None // Or configure a release repository if needed
 }
 
 ThisBuild / licenses := List(
@@ -59,15 +65,18 @@ ThisBuild / developers := List(
 )
 
 lazy val arch = System.getProperty("os.arch") match {
-  case "amd64" | "x86_64" => "amd64"
+  case "amd64" | "x86_64"  => "amd64"
   case "aarch64" | "arm64" => "arm64"
-  case other => other
+  case other               => other
 }
 
 // Get git branch name from env var (for Docker builds) or git command, sanitize for Maven version
 lazy val gitBranch = {
-  val branch = sys.env.getOrElse("GIT_BRANCH",
-    scala.util.Try(Process("git rev-parse --abbrev-ref HEAD").!!.trim).getOrElse("unknown")
+  val branch = sys.env.getOrElse(
+    "GIT_BRANCH",
+    scala.util
+      .Try(Process("git rev-parse --abbrev-ref HEAD").!!.trim)
+      .getOrElse("unknown")
   )
   // Replace invalid characters for Maven version (only alphanumeric, dash, dot, underscore allowed)
   branch.replaceAll("[^a-zA-Z0-9._-]", "-")
@@ -79,7 +88,7 @@ lazy val root = (project in file("."))
     assembly / parallelExecution := true,
     Test / parallelExecution := true,
     Compile / compile / parallelExecution := true,
-    version := s"0.1.0-${gitBranch}-${arch}-SNAPSHOT",  // SNAPSHOT version for Nexus
+    version := s"0.1.0-${gitBranch}-${arch}-SNAPSHOT", // SNAPSHOT version for Nexus
     organization := "com.zilliz",
 
     // Disable Scaladoc and sources jar for publish (not needed for internal Nexus, speeds up build)
@@ -99,7 +108,6 @@ lazy val root = (project in file("."))
       "-Djava.library.path=.",
       "--add-opens=java.base/java.nio=ALL-UNNAMED"
     ),
-
     run / envVars := Map(
       "LD_PRELOAD" -> (baseDirectory.value / s"src/main/resources/native/libmilvus-storage.so").getAbsolutePath
     ),
@@ -120,7 +128,6 @@ lazy val root = (project in file("."))
       "--add-opens=java.base/java.util=ALL-UNNAMED",
       "--add-opens=java.base/sun.security.action=ALL-UNNAMED"
     ),
-
     Test / envVars := Map(
       "LD_PRELOAD" -> (baseDirectory.value / s"src/main/resources/native/libmilvus-storage.so").getAbsolutePath
     ),
@@ -128,7 +135,6 @@ lazy val root = (project in file("."))
     // Add milvus-storage JNI library as unmanaged dependency
     Compile / unmanagedJars += baseDirectory.value / "milvus-storage" / "java" / "target" / "scala-2.13" / "milvus-storage-jni-test_2.13-0.1.0-SNAPSHOT.jar",
     Test / unmanagedJars += baseDirectory.value / "milvus-storage" / "java" / "target" / "scala-2.13" / "milvus-storage-jni-test_2.13-0.1.0-SNAPSHOT.jar",
-
     libraryDependencies ++= Seq(
       munit % Test,
       scalaTest % Test,
@@ -204,10 +210,12 @@ assembly / assemblyMergeStrategy := {
   case x if x.endsWith("module-info.class") =>
     MergeStrategy.discard
   // Handle hadoop package-info conflicts
-  case PathList("org", "apache", "hadoop", xs @ _*) if xs.last == "package-info.class" =>
+  case PathList("org", "apache", "hadoop", xs @ _*)
+      if xs.last == "package-info.class" =>
     MergeStrategy.first
   // Handle AWS SDK VersionInfo conflicts
-  case PathList("software", "amazon", "awssdk", xs @ _*) if xs.last == "VersionInfo.class" =>
+  case PathList("software", "amazon", "awssdk", xs @ _*)
+      if xs.last == "VersionInfo.class" =>
     MergeStrategy.first
   // Default case
   case x =>

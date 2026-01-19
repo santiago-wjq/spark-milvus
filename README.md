@@ -70,7 +70,7 @@ To use the SNAPSHOT version, you need to add the snapshot repository to your bui
 **For SBT (build.sbt):**
 
 ```
-ThisBuild / resolvers += "Sonatype Snapshots" at "https://central.sonatype.com/repository/maven-snapshots/"
+ThisBuild / resolvers += "Sonatype Snapshots" at "https://nexus.zilliz.cc/repository/maven-snapshots"
 ```
 
 ### Build and Package Milvus Spark Connector
