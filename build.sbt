@@ -8,48 +8,37 @@ credentials ++= {
   val realm = "Sonatype Nexus Repository Manager"
   val host = "nexus.zilliz.cc"
 
-  println(s"[Build] Checking Nexus credentials for $host ($realm)...")
+  println(s"[Build] Searching for Nexus credentials for $host ($realm)...")
 
-  // 1. Try Environment Variables first (CI/CD friendly)
-  val envCreds = (sys.env.get("NEXUS_USER"), sys.env.get("NEXUS_PASSWORD")) match {
-    case (Some(u), Some(p)) =>
-      println("[Build] Found NEXUS_USER and NEXUS_PASSWORD in environment variables.")
-      Seq(Credentials(realm, host, u, p))
-    case _ =>
-      println("[Build] NEXUS_USER/NEXUS_PASSWORD not set in environment.")
-      Seq.empty
-  }
+  val credFile = List(
+    Path.userHome / ".sbt" / "zilliz_nexus_credentials",
+    file(".sbt/zilliz_nexus_credentials")
+  ).find(_.exists)
 
-  // 2. Try File-based credentials
-  val fileCreds = {
-    val credFile = List(
-      Path.userHome / ".sbt" / "zilliz_nexus_credentials",
-      file(".sbt/zilliz_nexus_credentials")
-    ).find(_.exists)
-      .getOrElse(Path.userHome / ".sbt" / "zilliz_nexus_credentials")
-
-    println(s"[Build] Checking credentials file: $credFile")
-
-    if (credFile.exists) {
-      println(s"[Build] Loading credentials from file: $credFile")
+  credFile match {
+    case Some(f) =>
+      println(s"[Build] Found credentials file at: ${f.getAbsolutePath}")
       try {
-        Seq(Credentials(credFile))
+        // Explicitly load and verify the file content if possible, or just pass to Credentials
+        Seq(Credentials(f))
       } catch {
         case e: Exception =>
-          println(s"[Build] ERROR: Failed to define credentials from file: ${e.getMessage}")
-          e.printStackTrace()
+          println(s"[Build] ERROR: Failed to load credentials file: ${e.getMessage}")
           Seq.empty
       }
-    } else {
-      val fallback = Path.userHome / ".sbt" / "sonatype.credentials"
-      println(s"[Build] Primary credentials file not found. Fallback to: $fallback")
-      Seq(Credentials(fallback))
-    }
+    case None =>
+      val sonatype = Path.userHome / ".sbt" / "sonatype.credentials"
+      if (sonatype.exists) {
+        println(s"[Build] Using fallback credentials file: ${sonatype.getAbsolutePath}")
+        Seq(Credentials(sonatype))
+      } else {
+        println(s"[Build] CRITICAL: No credentials file found! Tried:")
+        println(s"  - ${Path.userHome / ".sbt" / "zilliz_nexus_credentials"}")
+        println(s"  - ${file(".sbt/zilliz_nexus_credentials").getAbsolutePath}")
+        println(s"  - ${sonatype.getAbsolutePath}")
+        Seq.empty
+      }
   }
-
-  val finalCreds = envCreds ++ fileCreds
-  println(s"[Build] Total credential sets loaded: ${finalCreds.size}")
-  finalCreds
 }
 
 ThisBuild / organizationName := "zilliz"
