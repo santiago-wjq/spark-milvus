@@ -4,18 +4,32 @@ import scala.io.Source
 import Dependencies._
 
 // Load Zilliz Nexus credentials
-credentials += {
-  val credFile = List(
-    Path.userHome / ".sbt" / "zilliz_nexus_credentials",
-    file(".sbt/zilliz_nexus_credentials")
-  ).find(_.exists)
-    .getOrElse(Path.userHome / ".sbt" / "zilliz_nexus_credentials")
+credentials ++= {
+  val realm = "Sonatype Nexus Repository Manager"
+  val host = "nexus.zilliz.cc"
 
-  if (credFile.exists) {
-    Credentials(credFile)
-  } else {
-    Credentials(Path.userHome / ".sbt" / "sonatype.credentials")
+  // 1. Try Environment Variables first (CI/CD friendly)
+  val envCreds = (sys.env.get("NEXUS_USER"), sys.env.get("NEXUS_PASSWORD")) match {
+    case (Some(u), Some(p)) => Seq(Credentials(realm, host, u, p))
+    case _                  => Seq.empty
   }
+
+  // 2. Try File-based credentials
+  val fileCreds = {
+    val credFile = List(
+      Path.userHome / ".sbt" / "zilliz_nexus_credentials",
+      file(".sbt/zilliz_nexus_credentials")
+    ).find(_.exists)
+      .getOrElse(Path.userHome / ".sbt" / "zilliz_nexus_credentials")
+
+    if (credFile.exists) {
+      Seq(Credentials(credFile))
+    } else {
+      Seq(Credentials(Path.userHome / ".sbt" / "sonatype.credentials"))
+    }
+  }
+
+  envCreds ++ fileCreds
 }
 
 ThisBuild / organizationName := "zilliz"
