@@ -132,14 +132,6 @@ lazy val root = (project in file("."))
       "--add-opens=java.base/sun.security.action=ALL-UNNAMED"
     ),
 
-    // Set LD_LIBRARY_PATH for tests to load native libraries from temp directory
-    // Users should extract native libs and set this path before running tests:
-    //   unzip -j $(coursier fetch com.zilliz:milvus-storage-jni_2.13:0.1.3) "linux-x86_64/*" -d /tmp/milvus-storage-native
-    //   export LD_LIBRARY_PATH=/tmp/milvus-storage-native:$LD_LIBRARY_PATH
-    Test / envVars ++= Map(
-      "LD_LIBRARY_PATH" -> s"/tmp/milvus-storage-native:${sys.env.getOrElse("LD_LIBRARY_PATH", "")}"
-    ),
-
     libraryDependencies ++= Seq(
       milvusStorageJni,
       munit % Test,
