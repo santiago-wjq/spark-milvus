@@ -1,0 +1,66 @@
+name: Release to Maven Central
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup sbt
+        uses: sbt/setup-sbt@v1
+
+      - name: Cache sbt
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.sbt
+            ~/.ivy2/cache
+            ~/.cache/coursier
+          key: sbt-${{ runner.os }}-${{ hashFiles('**/*.sbt', 'project/**') }}
+          restore-keys: sbt-${{ runner.os }}-
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Setup GPG
+        run: |
+          echo "${{ secrets.PGP_SECRET }}" | base64 -d | gpg --batch --import
+          gpg --batch --pinentry-mode loopback --export-secret-keys > ~/.gnupg/secring.gpg
+
+      - name: Setup Sonatype credentials
+        run: |
+          mkdir -p ~/.sbt
+          cat > ~/.sbt/sonatype_central_credentials << EOF
+          host=central.sonatype.com
+          user=${{ secrets.SONATYPE_USERNAME }}
+          password=${{ secrets.SONATYPE_PASSWORD }}
+          EOF
+
+      - name: Compile
+        run: sbt compile
+
+      - name: Run tests
+        run: sbt test
+
+      - name: Publish to Maven Central
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          sbt "set version := \"$RELEASE_VERSION\"" \
+              "set ThisBuild / credentials += Credentials(Path.userHome / \".sbt\" / \"sonatype_central_credentials\")" \
+              "+publishSigned" \
+              "sonatypeBundleRelease"
