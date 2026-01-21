@@ -113,12 +113,7 @@ lazy val root = (project in file("."))
     // JVM options for run
     run / javaOptions ++= Seq(
       "-Xss2m",
-      "-Djava.library.path=.",
       "--add-opens=java.base/java.nio=ALL-UNNAMED"
-    ),
-
-    run / envVars := Map(
-      "LD_PRELOAD" -> (baseDirectory.value / s"src/main/resources/native/libmilvus-storage.so").getAbsolutePath
     ),
 
     // Include test dependencies in run classpath for example applications
@@ -128,7 +123,6 @@ lazy val root = (project in file("."))
     Test / javaOptions ++= Seq(
       "-Xss2m",
       "-Xmx4g",
-      s"-Djava.library.path=${(baseDirectory.value / "src/main/resources/native").getAbsolutePath}",
       "-Dlog4j2.configurationFile=log4j2.properties",
       "-Dlog4j2.debug=false",
       "--add-opens=java.base/java.nio=ALL-UNNAMED",
@@ -138,8 +132,12 @@ lazy val root = (project in file("."))
       "--add-opens=java.base/sun.security.action=ALL-UNNAMED"
     ),
 
-    Test / envVars := Map(
-      "LD_LIBRARY_PATH" -> (baseDirectory.value / "src/main/resources/native").getAbsolutePath
+    // Set LD_LIBRARY_PATH for tests to load native libraries from temp directory
+    // Users should extract native libs and set this path before running tests:
+    //   unzip -j $(coursier fetch com.zilliz:milvus-storage-jni_2.13:0.1.3) "linux-x86_64/*" -d /tmp/milvus-storage-native
+    //   export LD_LIBRARY_PATH=/tmp/milvus-storage-native:$LD_LIBRARY_PATH
+    Test / envVars ++= Map(
+      "LD_LIBRARY_PATH" -> s"/tmp/milvus-storage-native:${sys.env.getOrElse("LD_LIBRARY_PATH", "")}"
     ),
 
     libraryDependencies ++= Seq(
