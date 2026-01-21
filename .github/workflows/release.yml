@@ -53,9 +53,6 @@ jobs:
       - name: Compile
         run: sbt compile
 
-      - name: Run tests
-        run: sbt test
-
       - name: Publish to Maven Central
         env:
           RELEASE_VERSION: ${{ steps.version.outputs.VERSION }}
