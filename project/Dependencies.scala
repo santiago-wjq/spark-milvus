@@ -65,5 +65,5 @@ object Dependencies {
   lazy val arrowCData = "org.apache.arrow" % "arrow-c-data" % arrowVersion
 
   // Milvus Storage JNI from Maven Central
-  lazy val milvusStorageJni = "com.zilliz" %% "milvus-storage-jni" % "0.1.3"
+  lazy val milvusStorageJni = "com.zilliz" %% "milvus-storage-jni" % "0.1.6"
 }
