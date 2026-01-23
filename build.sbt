@@ -78,13 +78,17 @@ lazy val arch = System.getProperty("os.arch") match {
   case other => other
 }
 
-// Get git branch name from env var (for Docker builds) or git command, sanitize for Maven version
-lazy val gitBranch = {
-  val branch = sys.env.getOrElse("GIT_BRANCH",
-    scala.util.Try(Process("git rev-parse --abbrev-ref HEAD").!!.trim).getOrElse("unknown")
-  )
-  // Replace invalid characters for Maven version (only alphanumeric, dash, dot, underscore allowed)
-  branch.replaceAll("[^a-zA-Z0-9._-]", "-")
+// Get version from RELEASE_VERSION env var (for releases) or generate from git branch
+lazy val projectVersion = sys.env.get("RELEASE_VERSION") match {
+  case Some(v) => v  // Use explicit release version
+  case None =>
+    // Get git branch name from env var (for Docker builds) or git command
+    val branch = sys.env.getOrElse("GIT_BRANCH",
+      scala.util.Try(Process("git rev-parse --abbrev-ref HEAD").!!.trim).getOrElse("unknown")
+    )
+    // Replace invalid characters for Maven version (only alphanumeric, dash, dot, underscore allowed)
+    val sanitizedBranch = branch.replaceAll("[^a-zA-Z0-9._-]", "-")
+    s"${sanitizedBranch}-${arch}-SNAPSHOT"
 }
 
 lazy val root = (project in file("."))
@@ -93,7 +97,7 @@ lazy val root = (project in file("."))
     assembly / parallelExecution := true,
     Test / parallelExecution := true,
     Compile / compile / parallelExecution := true,
-    version := s"${gitBranch}-${arch}-SNAPSHOT",
+    version := projectVersion,
     organization := "com.zilliz",
 
     // Disable Scaladoc and sources jar for publish (not needed, speeds up build)
