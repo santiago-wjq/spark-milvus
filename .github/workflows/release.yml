@@ -59,4 +59,4 @@ jobs:
         run: |
           sbt "set ThisBuild / credentials += Credentials(Path.userHome / \".sbt\" / \"sonatype_central_credentials\")" \
               "+publishSigned" \
-              "sonatypeBundleRelease"
+              "sonatypeCentralUpload"
