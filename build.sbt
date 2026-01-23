@@ -78,13 +78,17 @@ lazy val arch = System.getProperty("os.arch") match {
   case other => other
 }
 
-// Get git branch name from env var (for Docker builds) or git command, sanitize for Maven version
-lazy val gitBranch = {
-  val branch = sys.env.getOrElse("GIT_BRANCH",
-    scala.util.Try(Process("git rev-parse --abbrev-ref HEAD").!!.trim).getOrElse("unknown")
-  )
-  // Replace invalid characters for Maven version (only alphanumeric, dash, dot, underscore allowed)
-  branch.replaceAll("[^a-zA-Z0-9._-]", "-")
+// Get version from RELEASE_VERSION env var (for releases) or generate from git branch
+lazy val projectVersion = sys.env.get("RELEASE_VERSION") match {
+  case Some(v) => v  // Use explicit release version
+  case None =>
+    // Get git branch name from env var (for Docker builds) or git command
+    val branch = sys.env.getOrElse("GIT_BRANCH",
+      scala.util.Try(Process("git rev-parse --abbrev-ref HEAD").!!.trim).getOrElse("unknown")
+    )
+    // Replace invalid characters for Maven version (only alphanumeric, dash, dot, underscore allowed)
+    val sanitizedBranch = branch.replaceAll("[^a-zA-Z0-9._-]", "-")
+    s"${sanitizedBranch}-${arch}-SNAPSHOT"
 }
 
 lazy val root = (project in file("."))
@@ -93,12 +97,12 @@ lazy val root = (project in file("."))
     assembly / parallelExecution := true,
     Test / parallelExecution := true,
     Compile / compile / parallelExecution := true,
-    version := s"${gitBranch}-${arch}-SNAPSHOT",
+    version := projectVersion,
     organization := "com.zilliz",
 
-    // Disable Scaladoc and sources jar for publish (not needed, speeds up build)
-    Compile / packageDoc / publishArtifact := false,
-    Compile / packageSrc / publishArtifact := false,
+    // Enable Scaladoc and sources jar for Maven Central (required)
+    Compile / packageDoc / publishArtifact := true,
+    Compile / packageSrc / publishArtifact := true,
 
     // Fork JVM for run and tests to properly load native libraries
     run / fork := true,
@@ -113,12 +117,7 @@ lazy val root = (project in file("."))
     // JVM options for run
     run / javaOptions ++= Seq(
       "-Xss2m",
-      "-Djava.library.path=.",
       "--add-opens=java.base/java.nio=ALL-UNNAMED"
-    ),
-
-    run / envVars := Map(
-      "LD_PRELOAD" -> (baseDirectory.value / s"src/main/resources/native/libmilvus-storage.so").getAbsolutePath
     ),
 
     // Include test dependencies in run classpath for example applications
@@ -128,7 +127,6 @@ lazy val root = (project in file("."))
     Test / javaOptions ++= Seq(
       "-Xss2m",
       "-Xmx4g",
-      s"-Djava.library.path=${(baseDirectory.value / "src/main/resources/native").getAbsolutePath}",
       "-Dlog4j2.configurationFile=log4j2.properties",
       "-Dlog4j2.debug=false",
       "--add-opens=java.base/java.nio=ALL-UNNAMED",
@@ -138,15 +136,8 @@ lazy val root = (project in file("."))
       "--add-opens=java.base/sun.security.action=ALL-UNNAMED"
     ),
 
-    Test / envVars := Map(
-      "LD_LIBRARY_PATH" -> (baseDirectory.value / "src/main/resources/native").getAbsolutePath
-    ),
-
-    // Add milvus-storage JNI library as unmanaged dependency
-    Compile / unmanagedJars += baseDirectory.value / "milvus-storage" / "java" / "target" / "scala-2.13" / "milvus-storage-jni-test_2.13-0.1.0-SNAPSHOT.jar",
-    Test / unmanagedJars += baseDirectory.value / "milvus-storage" / "java" / "target" / "scala-2.13" / "milvus-storage-jni-test_2.13-0.1.0-SNAPSHOT.jar",
-
     libraryDependencies ++= Seq(
+      milvusStorageJni,
       munit % Test,
       scalaTest % Test,
       grpcNetty,

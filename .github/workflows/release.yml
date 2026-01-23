@@ -1,0 +1,90 @@
+name: Release to Maven Central
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup sbt
+        uses: sbt/setup-sbt@v1
+
+      - name: Cache sbt
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.sbt
+            ~/.ivy2/cache
+            ~/.cache/coursier
+          key: sbt-${{ runner.os }}-${{ hashFiles('**/*.sbt', 'project/**') }}
+          restore-keys: sbt-${{ runner.os }}-
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Setup GPG
+        run: |
+          echo "${{ secrets.PGP_SECRET }}" | base64 -d | gpg --batch --import
+          gpg --batch --pinentry-mode loopback --export-secret-keys > ~/.gnupg/secring.gpg
+
+      - name: Setup Sonatype credentials
+        run: |
+          mkdir -p ~/.sbt
+          cat > ~/.sbt/sonatype_central_credentials << EOF
+          host=central.sonatype.com
+          user=${{ secrets.SONATYPE_USERNAME }}
+          password=${{ secrets.SONATYPE_PASSWORD }}
+          EOF
+
+      - name: Compile
+        run: sbt compile
+
+      - name: Publish Signed Artifacts
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          sbt "set ThisBuild / version := \"${{ steps.version.outputs.VERSION }}\"" \
+              "set ThisBuild / credentials += Credentials(Path.userHome / \".sbt\" / \"sonatype_central_credentials\")" \
+              "+publishSigned"
+
+      - name: Create and Upload Bundle to Central
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          # Create bundle zip from sona-staging directory
+          cd target/sona-staging
+          zip -r ../bundle.zip .
+          cd ../..
+
+          # Upload to Sonatype Central using their API
+          echo "Uploading bundle to Sonatype Central..."
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -u "${{ secrets.SONATYPE_USERNAME }}:${{ secrets.SONATYPE_PASSWORD }}" \
+            -F "bundle=@target/bundle.zip" \
+            "https://central.sonatype.com/api/v1/publisher/upload?publishingType=AUTOMATIC")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | head -n-1)
+
+          echo "Response: $BODY"
+          echo "HTTP Code: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "201" ] && [ "$HTTP_CODE" != "200" ]; then
+            echo "Upload failed with HTTP code $HTTP_CODE"
+            exit 1
+          fi
+
+          echo "Successfully uploaded to Sonatype Central!"
