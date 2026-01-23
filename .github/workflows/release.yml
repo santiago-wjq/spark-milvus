@@ -53,11 +53,26 @@ jobs:
       - name: Compile
         run: sbt compile
 
-      - name: Publish to Maven Central
+      - name: Publish Signed Artifacts
         env:
           RELEASE_VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
           sbt "set ThisBuild / version := \"${{ steps.version.outputs.VERSION }}\"" \
               "set ThisBuild / credentials += Credentials(Path.userHome / \".sbt\" / \"sonatype_central_credentials\")" \
-              "+publishSigned" \
+              "+publishSigned"
+
+      - name: Prepare Bundle for Central
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          mkdir -p target/sonatype-staging/${VERSION}-bundle
+          cp -r target/sona-staging/* target/sonatype-staging/${VERSION}-bundle/
+          echo "Bundle directory contents:"
+          ls -la target/sonatype-staging/${VERSION}-bundle/
+
+      - name: Upload to Maven Central
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          sbt "set ThisBuild / version := \"${{ steps.version.outputs.VERSION }}\"" \
+              "set ThisBuild / credentials += Credentials(Path.userHome / \".sbt\" / \"sonatype_central_credentials\")" \
               "sonatypeCentralUpload"
