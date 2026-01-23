@@ -4,6 +4,8 @@ import scala.io.Source
 import xerial.sbt.Sonatype._
 
 ThisBuild / sonatypeCredentialHost := sonatypeCentralHost
+// Point bundle directory to sona-staging where publishSigned puts files for Central
+ThisBuild / sonatypeBundleDirectory := (ThisBuild / baseDirectory).value / "target" / "sona-staging"
 import Dependencies._
 
 // Load Sonatype Central credentials
