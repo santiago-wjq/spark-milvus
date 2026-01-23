@@ -61,18 +61,30 @@ jobs:
               "set ThisBuild / credentials += Credentials(Path.userHome / \".sbt\" / \"sonatype_central_credentials\")" \
               "+publishSigned"
 
-      - name: Prepare Bundle for Central
+      - name: Create and Upload Bundle to Central
         run: |
           VERSION=${{ steps.version.outputs.VERSION }}
-          mkdir -p target/sonatype-staging/${VERSION}-bundle
-          cp -r target/sona-staging/* target/sonatype-staging/${VERSION}-bundle/
-          echo "Bundle directory contents:"
-          ls -la target/sonatype-staging/${VERSION}-bundle/
+          # Create bundle zip from sona-staging directory
+          cd target/sona-staging
+          zip -r ../bundle.zip .
+          cd ../..
 
-      - name: Upload to Maven Central
-        env:
-          RELEASE_VERSION: ${{ steps.version.outputs.VERSION }}
-        run: |
-          sbt "set ThisBuild / version := \"${{ steps.version.outputs.VERSION }}\"" \
-              "set ThisBuild / credentials += Credentials(Path.userHome / \".sbt\" / \"sonatype_central_credentials\")" \
-              "sonatypeCentralUpload"
+          # Upload to Sonatype Central using their API
+          echo "Uploading bundle to Sonatype Central..."
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -u "${{ secrets.SONATYPE_USERNAME }}:${{ secrets.SONATYPE_PASSWORD }}" \
+            -F "bundle=@target/bundle.zip" \
+            "https://central.sonatype.com/api/v1/publisher/upload?publishingType=AUTOMATIC")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | head -n-1)
+
+          echo "Response: $BODY"
+          echo "HTTP Code: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "201" ] && [ "$HTTP_CODE" != "200" ]; then
+            echo "Upload failed with HTTP code $HTTP_CODE"
+            exit 1
+          fi
+
+          echo "Successfully uploaded to Sonatype Central!"
