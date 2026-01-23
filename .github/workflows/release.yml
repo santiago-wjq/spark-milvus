@@ -57,6 +57,7 @@ jobs:
         env:
           RELEASE_VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
-          sbt "set ThisBuild / credentials += Credentials(Path.userHome / \".sbt\" / \"sonatype_central_credentials\")" \
+          sbt "set ThisBuild / version := \"${{ steps.version.outputs.VERSION }}\"" \
+              "set ThisBuild / credentials += Credentials(Path.userHome / \".sbt\" / \"sonatype_central_credentials\")" \
               "+publishSigned" \
               "sonatypeCentralUpload"
