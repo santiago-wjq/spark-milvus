@@ -22,7 +22,7 @@ package com.zilliz.spark.connector
   * the segment sets and query groups through `core.index.SearchPlan`, delivers
   * the query set (`SearchQueries`, broadcast or with the shuffle), runs the
   * first stage (`SegmentSetSearch`), merges every query's top-k
-  * (`TopKAggregator`) and reads the output columns of the rows that survived
+  * (`CandidateBytes.merge` over an RDD shuffle by query id) and reads the output columns of the rows that survived
   * (`SearchTake`). Capabilities: R4, R5, R7, R11, R12, R13, R16, R18, V5, V7,
   * G3 (see docs/design/capabilities.md).
   */

@@ -109,7 +109,7 @@
 <tr><td>2</td><td><code>core.schema</code></td><td>向量布局描述：元素类型、维度、数据缓冲位置（<a href="read.html#types">read.html 6.4</a>）</td></tr>
 <tr><td>2</td><td><code>core.read.plan</code></td><td>段任务（<code>UnitReadTask</code> 中属于 Milvus 的一种）</td></tr>
 <tr><td>2</td><td><code>core.write.commit</code>、<code>client.api</code></td><td>索引记录与快照写出；外部快照恢复</td></tr>
-<tr><td>3</td><td><code>spark.read</code></td><td><code>MilvusSearch</code>：解析快照与查询集、把并行度交给 <code>SearchPlan</code>、广播、把任务包成分区、两个 Spark 阶段；<code>TopKAggregator</code> 包装 <code>TopKMerger</code>；<code>spark.metrics</code> 的 <code>SearchMetrics</code> 注册本次搜索的累加器</td></tr>
+<tr><td>3</td><td><code>spark.read</code></td><td><code>MilvusSearch</code>：解析快照与查询集、把并行度交给 <code>SearchPlan</code>、广播、把任务包成分区、两个 Spark 阶段；合并是按 <code>query_id</code> 的 RDD shuffle，用 <code>core.index</code> 的 <code>CandidateBytes.merge</code> 归并两份已排序的打包候选；<code>spark.metrics</code> 的 <code>SearchMetrics</code> 注册本次搜索的累加器</td></tr>
 <tr><td>3</td><td><code>spark.options</code>、<code>spark.procedure</code></td><td>搜索选项；<code>build_index</code> 与 <code>restore_snapshot</code> 过程</td></tr>
 <tr><td>4</td><td><code>apps.search</code></td><td>SQL 向量函数</td></tr>
 </tbody></table></div>
@@ -151,7 +151,7 @@
 <thead><tr><th>成本</th><th>exact</th><th>index</th></tr></thead><tbody>
 <tr><td>每段读取</td><td>向量列 N × d × 4 字节（float32），加删除与过滤列；查询分几组都只读一遍</td><td>索引文件，与向量列同一量级：Cardinal 的量化索引更小，Faiss HNSW Flat 含原始向量和图；有删除或过滤时加这些列</td></tr>
 <tr><td>每段计算</td><td>Q × N × d 次乘加</td><td>每条查询的距离计算次数与 <code>ef</code> 和图的出度同量级</td></tr>
-<tr><td>合并</td><td colspan="2">段组数 × Q × K × 24 字节的 shuffle；查询分几组都是这个量，多组时按查询组分批交出</td></tr>
+<tr><td>合并</td><td colspan="2">段组数 × Q × K × 24 字节的 shuffle（每查询一条记录，<code>CandidateBytes.Width</code> 字节一条候选）；查询分几组都是这个量，多组时按查询组分批交出</td></tr>
 <tr><td>回表</td><td colspan="2">命中行所在的行组；每个输出列组的行组约 1 MB</td></tr>
 </tbody></table></div>
 <p>N 是段行数，d 是维度，Q 是查询数。召回基准与少量查询用 exact；查询集大且接受近似结果时用 index，它读取的字节与 exact 相当，省掉的是 Q × N × d 的计算。</p>
@@ -205,8 +205,8 @@
 <li><strong>第一阶段。</strong>一个任务一个段组，答完本作业的每个查询组。
 只有一个查询组时，任务逐段逐批调用 <code>SegmentSearch.run</code>，一批算完即释放，内存里只有一批向量；候选跨批跨段在任务内合并，每条查询最多交出 K 条。
 有多个查询组时，任务先把段组的向量读进内存（<code>SegmentSearch.hold</code>，段组在规划时按任务的常驻额度划分），查询组一个接一个在这份数据上算，每组算完交出自己的候选并释放这组的堆。查询组是流过来的，只过一遍；留在内存里的是段组，所以两条下发路都只读一遍底库。段组实际读出来超过额度（行数未知的段按额度一半估）时，<code>hold</code> 释放已读的返回 <code>Overflow</code>，任务退回逐组重读，代价是 I/O × 组数。
-两种情况的 shuffle 量都是「段组数 × 查询数 × K × 24 字节」。每条候选是查询 id、段 id、行号和分数。</li>
-<li><strong>合并。</strong>候选按查询序号 <code>groupBy</code>，用 <code>functions.udaf</code> 包装的 <code>TopKAggregator</code> 聚合；聚合缓冲是有界堆，每步只留 K 条，排序规则见 2.6。聚合结果展开成带 <code>rank</code> 的命中行。</li>
+两种情况的 shuffle 量都是「段组数 × 查询数 × K × 24 字节」。任务交出的是<strong>每查询一条记录</strong>：查询 id，加上这条查询在本段组的前 K 条候选打包成的字节（一条候选是段 id、行号、分数，共 <code>CandidateBytes.Width</code> = 24 字节，按 2.6 的排序规则从好到差）。候选不做成对象也不做成行：一条候选的事实是 24 字节，JVM 对象要为它付对象头、装箱与集合引用，实测一条候选在任务里会涨到 200 字节以上（<a href="../../../docs/reports/spark-milvus-candidate-materialization-2026-09-22/README.md">2026-09-22 的实测</a>）。</li>
+<li><strong>合并。</strong>候选按 <code>query_id</code> 做一次 RDD shuffle（<code>combineByKeyWithClassTag</code>，<code>mapSideCombine = false</code>：一个任务对每条查询只交一条记录，map 端没有可合的东西，开着只会把整个任务的输出攒到任务结束），reduce 端用 <code>CandidateBytes.merge</code> 走两份有序列表取前 K，排序规则见 2.6。分区数是「作业的任务槽数、第一阶段任务数、查询数 ÷ 4096」三者取大，再以查询数为上限——一条查询是一个 key，不能拆开。合并结果直接就是带 <code>rank</code> 的命中行，不再经过 SQL 聚合与 <code>explode</code>。</li>
 <li><strong>第二阶段。</strong><code>outputColumns</code> 非空时，命中行按段 id 重新分区，分区内按段 id 与行号排序；每段经 Milvus 的 <code>TableFormat</code> 对去重后的行号调用 <code>SegmentReader.take</code>，Arrow 行经 <code>ArrowConverter</code> 和 <code>CatalystTypeConverters</code> 转成 <code>Row</code>，由 <code>createDataFrame</code> 组成结果。<code>outputColumns</code> 为空时，命中行就是结果。</li>
 <li><strong>指标。</strong>两个阶段的计数与耗时累加到 1.3 列出的 <code>milvus.search.*</code> 累加器。</li>
 </ol>
@@ -721,7 +721,7 @@ SELECT * FROM queries JOIN milvus.db.coll ON milvus.system.knn(vec, q, 10, 'L2')
 <h2 id="benefits">四、这样设计带来的好处</h2>
 <ol>
 <li><strong>一次扫描服务整组查询。</strong>每批向量一次调用算完整组查询，读取和解码的成本与查询条数无关。</li>
-<li><strong>跨任务只传最小候选。</strong>第一阶段每条候选 24 字节，任务内先合并，shuffle 量随段组数增长，与段数无关；输出列只为最终每条查询的 K 行回表，回表量是「查询数 × K」行。</li>
+<li><strong>跨任务只传最小候选。</strong>第一阶段每条候选 24 字节、每查询一条记录，任务内先合并，shuffle 量随段组数增长，与段数无关；输出列只为最终每条查询的 K 行回表，回表量是「查询数 × K」行。</li>
 <li><strong>结果与 Milvus 口径一致。</strong>距离计算与索引搜索都由 Knowhere 完成，分数与 Milvus 相同；行号与索引 label 相同，外表的虚拟主键可以直接对账。</li>
 <li><strong>精确结果直接做基准。</strong>同一查询集分别跑 exact 与 index，结果里的 <code>_segment_id</code> 与 <code>_row_offset</code> 就是行身份，调用方 join 一次得到召回率，连接器不为此另出作业。</li>
 <li><strong>向量不逐行拷贝。</strong>满足布局条件的批，数据缓冲原样交给 Knowhere，JVM 不物化向量。</li>

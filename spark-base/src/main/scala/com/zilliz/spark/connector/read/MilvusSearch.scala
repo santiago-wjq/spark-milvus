@@ -6,15 +6,19 @@ import scala.jdk.CollectionConverters._
 import org.apache.spark.internal.Logging
 import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.{DataFrame, Row, SparkSession}
-import org.apache.spark.sql.functions.{col, explode, udaf}
+import org.apache.spark.sql.{DataFrame, Encoders, Row, SparkSession}
+import org.apache.spark.sql.functions.col
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 import org.apache.spark.storage.StorageLevel
-import org.apache.spark.Partitioner
+import org.apache.spark.{HashPartitioner, Partitioner}
 
 import com.zilliz.milvus.storage.expr.PlanParser
-import com.zilliz.milvus.storage.index.{MachineResources, SearchPlan}
+import com.zilliz.milvus.storage.index.{
+  CandidateBytes,
+  MachineResources,
+  SearchPlan
+}
 import com.zilliz.milvus.storage.read.exec.SegmentIndexHandle
 import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
 import com.zilliz.spark.connector.metrics.SearchMetrics
@@ -40,6 +44,21 @@ object MilvusSearch extends Logging {
 
   private val Reserved =
     Set("query_id", "rank", "_score", "_segment_id", "_row_offset")
+
+  /** What a search returns before the output columns, and the one place that
+    * shape is written down: [[SearchResult]] names the columns, so an empty
+    * result and a merged one cannot drift apart.
+    */
+  private[read] val HitSchema: StructType =
+    Encoders.product[SearchResult].schema
+
+  /** How many queries one merge partition is meant to take. The merge walks
+    * sorted lists, so a partition's work is linear in the candidates it reads;
+    * this only keeps a partition's reduce-side map from holding more than a few
+    * thousand queries' answers at once on a cluster whose parallelism is far
+    * below its query count.
+    */
+  private[read] val QueriesPerMergePartition: Int = 4096
 
   def search(
       spark: SparkSession,
@@ -259,21 +278,20 @@ object MilvusSearch extends Logging {
       if (plan.isEmpty) empty(spark)
       else
         merged(
-          spark.createDataFrame(
-            candidates(
-              spark,
-              selected,
-              partitions,
-              plan,
-              spec,
-              layout,
-              limits,
-              metrics
-            ),
-            SegmentSetSearch.CandidateSchema
+          spark,
+          candidates(
+            spark,
+            selected,
+            partitions,
+            plan,
+            spec,
+            layout,
+            limits,
+            metrics
           ),
           k,
-          searchMetric
+          searchMetric,
+          mergePartitions(spark, queryCount, plan.tasks)
         )
     if (outputColumns.isEmpty) hits
     else
@@ -342,7 +360,7 @@ object MilvusSearch extends Logging {
       layout: VectorLayout,
       limits: SearchLimits,
       metrics: SearchMetrics
-  ): RDD[Row] = {
+  ): RDD[(Long, Array[Byte])] = {
     val byId =
       partitions.map(partition => partition.task.segmentId -> partition).toMap
     val sets = plan.sets.map(_.map(task => byId(task.segmentId)))
@@ -555,32 +573,75 @@ object MilvusSearch extends Logging {
     )
   }
 
-  /** Every query's candidates become its global top-k, best first. */
-  private[read] def merged(
-      candidates: DataFrame,
-      k: Int,
-      metric: String
-  ): DataFrame = {
-    val topK = udaf(new TopKAggregator(k, metric))
-    candidates
-      .groupBy(col("query_id"))
-      .agg(
-        topK(col("segment_id"), col("row_offset"), col("score")).as("top")
-      )
-      .select(col("query_id"), explode(col("top.hits")).as("hit"))
-      .select(
-        col("query_id"),
-        col("hit.rank").as("rank"),
-        col("hit.score").as("_score"),
-        col("hit.segmentId").as("_segment_id"),
-        col("hit.rowOffset").as("_row_offset")
-      )
+  /** How many partitions the merge runs in: one for each task slot the job
+    * has, and never more than there are queries. The merge is an RDD shuffle
+    * rather than a SQL aggregation, so nothing downstream re-partitions it and
+    * `spark.sql.shuffle.partitions` does not apply.
+    */
+  private[read] def mergePartitions(
+      spark: SparkSession,
+      queries: Long,
+      tasks: Int
+  ): Int = {
+    require(queries > 0, s"A search needs at least one query: $queries")
+    require(tasks > 0, s"A search needs at least one task: $tasks")
+    // At least one partition for every task slot the job has and for every
+    // first-stage task, so no executor sits out the merge; more when the
+    // queries would otherwise pile up in one partition; never more than there
+    // are queries, since a query is one key and cannot be split.
+    val slots = math.max(1, spark.sparkContext.defaultParallelism)
+    val byQueries =
+      (queries + QueriesPerMergePartition - 1L) / QueriesPerMergePartition
+    val wanted = math.max(math.max(slots.toLong, tasks.toLong), byQueries)
+    math.max(1L, math.min(queries, wanted)).toInt
   }
 
-  private def empty(spark: SparkSession): DataFrame = {
-    import spark.implicits._
-    spark.emptyDataset[SearchResult].toDF()
+  /** Every query's candidates become its global top-k, best first.
+    *
+    * Each task already merged its own segments, so what arrives here is one
+    * packed answer per (query, task) and the merge is a walk over two sorted
+    * lists, not an aggregation over candidates. Map-side combining is off on
+    * purpose: a task emits each of its queries once, so combining on the map
+    * side would hold every query's answer until the task ends instead of
+    * writing each one as it is packed (section 2.6).
+    */
+  private[read] def merged(
+      spark: SparkSession,
+      candidates: RDD[(Long, Array[Byte])],
+      k: Int,
+      metric: String,
+      partitions: Int
+  ): DataFrame = {
+    require(partitions > 0, s"The merge needs a partition: $partitions")
+    val hits = candidates
+      .combineByKeyWithClassTag[Array[Byte]](
+        (packed: Array[Byte]) => packed,
+        (merged: Array[Byte], packed: Array[Byte]) =>
+          CandidateBytes.merge(merged, packed, k, metric),
+        (left: Array[Byte], right: Array[Byte]) =>
+          CandidateBytes.merge(left, right, k, metric),
+        new HashPartitioner(partitions),
+        mapSideCombine = false
+      )
+      .flatMap { case (query, packed) => rows(query, packed) }
+    spark.createDataFrame(hits, HitSchema)
   }
+
+  /** One query's answer as the rows the result contract promises: rank from
+    * one, best first.
+    */
+  private[read] def rows(query: Long, packed: Array[Byte]): Seq[Row] = {
+    val hits = Vector.newBuilder[Row]
+    var rank = 1
+    CandidateBytes.foreach(packed) { (segmentId, rowOffset, score) =>
+      hits += Row(query, rank, score, segmentId, rowOffset)
+      rank += 1
+    }
+    hits.result()
+  }
+
+  private def empty(spark: SparkSession): DataFrame =
+    spark.createDataFrame(spark.sparkContext.emptyRDD[Row], HitSchema)
 
   private def dimensionOf(field: FieldSchema): Int = field.typeParams
     .find(_.key == "dim")

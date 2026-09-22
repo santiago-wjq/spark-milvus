@@ -2,17 +2,12 @@ package com.zilliz.spark.connector.read
 
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.types.{
-  DoubleType,
-  LongType,
-  StructField,
-  StructType
-}
-import org.apache.spark.sql.Row
+import org.apache.spark.sql.types.StructType
 import org.apache.spark.TaskContext
 
 import com.zilliz.milvus.storage.expr.PlanParser
 import com.zilliz.milvus.storage.index.{
+  CandidateBytes,
   MachineResources,
   QueryMatrix,
   SearchPlan,
@@ -85,23 +80,13 @@ private[read] object SegmentSetSearch extends Logging {
       batchMaxBytes: Option[Long]
   ) extends Serializable
 
-  /** What one task sends on: at most k candidates for each of its queries. */
-  val CandidateSchema: StructType = StructType(
-    Seq(
-      StructField("query_id", LongType, nullable = false),
-      StructField("segment_id", LongType, nullable = false),
-      StructField("row_offset", LongType, nullable = false),
-      StructField("score", DoubleType, nullable = false)
-    )
-  )
-
   def run(
       set: Seq[MilvusInputPartition],
       spec: Spec,
       groups: Iterator[SearchQueries.Group],
       groupCount: Int,
       metrics: SearchMetrics
-  ): Iterator[Row] = {
+  ): Iterator[(Long, Array[Byte])] = {
     require(set.nonEmpty, "A first-stage task has no segments")
     require(groupCount > 0, s"A task answers $groupCount query groups")
     val segments = set.map(_.task.segmentId)
@@ -126,7 +111,9 @@ private[read] object SegmentSetSearch extends Logging {
       source(partitions(segmentId), spec, allocator.allocator, metrics)
     // One group over the set, reading every segment as it goes: what a single
     // group always does, and what a set too large to hold does for each group.
-    def streamed(group: SearchQueries.Group): Seq[Row] = {
+    def streamed(
+        group: SearchQueries.Group
+    ): Seq[(Long, Array[Byte])] = {
       val (merger, counters) = searching(group, spec, allocator.allocator) {
         queries =>
           SegmentSearch.run(
@@ -253,20 +240,31 @@ private[read] object SegmentSetSearch extends Logging {
     finally queries.close()
   }
 
-  /** The candidates of one group, named by query id rather than by position in
-    * the group.
+  /** The candidates of one group: one record for each query that found
+    * anything, named by query id rather than by position in the group, holding
+    * that query's best k packed into bytes.
+    *
+    * One record per query rather than one per candidate is what keeps this
+    * stage's output the "queries × k × CandidateBytes.Width" the design counts
+    * on, and what lets the merge stage walk two answers instead of aggregating
+    * candidate by candidate (docs/design/architecture/vector-search.html
+    * section 2.1). The merger's heaps are released as they are packed, so a
+    * task holds the queries it has packed as bytes and the rest as objects,
+    * never both for the same query.
     */
   private def candidates(
       merger: TopKMerger,
       group: SearchQueries.Group
-  ): Seq[Row] = merger.candidates.map(candidate =>
-    Row(
-      group.ids(candidate.query),
-      candidate.segmentId,
-      candidate.rowOffset,
-      candidate.score
-    )
-  )
+  ): Seq[(Long, Array[Byte])] = {
+    val packed = Vector.newBuilder[(Long, Array[Byte])]
+    var query = 0
+    while (query < group.queries) {
+      val bytes = merger.takePacked(query)
+      if (bytes.length > 0) packed += group.ids(query) -> bytes
+      query += 1
+    }
+    packed.result()
+  }
 
   /** What this segment offers the search: its vectors, or its index. */
   private def source(

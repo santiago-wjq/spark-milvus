@@ -3,7 +3,7 @@ package com.zilliz.milvus.storage
 /** Vector execution and its buffers, exclusions and per-segment top-k.
   *
   * Main types: SegmentSearch with ExactScan and IndexProbe, SearchPlan,
-  * TopKMerger, QueryMatrix, KnowhereBuffers. SearchPlan cuts a search into one
+  * TopKMerger, CandidateBytes, QueryMatrix, KnowhereBuffers. SearchPlan cuts a search into one
   * task per segment set and TopKMerger keeps each query's best k, in a task and
   * again in the Spark aggregation. KnowhereBuffers hands one Arrow batch of a
   * dense vector column to Knowhere, as it lies when the layout allows and
@@ -22,7 +22,9 @@ package com.zilliz.milvus.storage
   * reading and decoding index files belong to the Milvus TableFormat side
   * (docs/design/architecture/table-version.html section 3); IndexFileCodec and
   * MilvusIndexFileDecoder now live in core.codec. TopKMerger keeps k per query
-  * for batches and segments alike, KnowhereBuffers hands Arrow data buffers to
+  * for batches and segments alike and packs each query's best k into
+  * CandidateBytes for the caller to send on — one record per query of 24 bytes
+  * per candidate, which merges by walking two sorted lists, KnowhereBuffers hands Arrow data buffers to
   * Knowhere as ByteBuffers, and IndexWriter builds a segment's index and hands
   * its BinarySet to the Milvus TableFormat side, which encodes and writes the
   * files (W6).
