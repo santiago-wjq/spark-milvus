@@ -505,7 +505,7 @@ rebuilt and validated from its new gitlink before any native or real-data result
 is claimed. See the measured results and limitations in the
 [vector design](design/architecture/vector-search.html#interop).
 
-The gitlink now points at 29210a33, where the upstream DiskANN tests keep the
+The gitlink now points at 168cb2e8, where the upstream DiskANN tests keep the
 exact check for OSS DiskANN and, in Cardinal builds, check ordering, recall and
 a 0.05 + 0.02 x distance tolerance instead (the C test through
 `KNOWHERE_WITH_CARDINAL`; `DiskAnnIT` through
