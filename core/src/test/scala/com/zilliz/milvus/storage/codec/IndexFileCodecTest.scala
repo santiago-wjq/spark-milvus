@@ -133,6 +133,29 @@ class IndexFileCodecTest extends AnyFunSuite {
     assert(parsed.getLong() == 16)
   }
 
+  test("raw Cardinal payloads above 2 GiB copy every byte and the footer") {
+    // A 2.6 GB segment index: the footer position no longer fits an Int, so
+    // narrowing it before the range check gave arraycopy a negative offset.
+    val store = new CardinalStore(2L * 1024 * 1024 * 1024 + 4096)
+    val payload =
+      new IndexFileCodec.CardinalPayload(store, "build/_mem.index.bin")
+    var copied = 0L
+    val footer = new Array[Byte](24)
+    payload.copyTo { (offset, buffer) =>
+      assert(offset == copied)
+      copied += buffer.remaining()
+      if (copied == payload.length) {
+        buffer.position(buffer.limit() - 24)
+        buffer.get(footer)
+      }
+    }
+    assert(copied == store.length)
+    assert(payload.bytesRead == store.length + 24)
+    val parsed = ByteBuffer.wrap(footer).order(ByteOrder.LITTLE_ENDIAN)
+    assert(parsed.getInt() == 0x43415244)
+    assert(parsed.getLong(8) == store.length - 32)
+  }
+
   test("raw Cardinal rejects objects without a footer, and short reads") {
     Seq(0L, 23L).foreach { length =>
       val store = new CardinalStore(length)
