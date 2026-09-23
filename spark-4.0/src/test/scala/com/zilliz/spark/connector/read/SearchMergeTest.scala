@@ -64,7 +64,11 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       candidates(rows, metric),
       k,
       metric,
-      MilvusSearch.mergePartitions(spark, math.max(1, rows.map(_._1).distinct.size.toLong), 2)
+      MilvusSearch.mergePartitions(
+        spark,
+        math.max(1, rows.map(_._1).distinct.size.toLong),
+        2
+      )
     )
 
   test("each query keeps its own best k, ranked from one") {
@@ -152,6 +156,7 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       "milvus.search.read.nanos",
       "milvus.search.index.bytes",
       "milvus.search.index.load.nanos",
+      "milvus.search.index.load.wait.nanos",
       "milvus.search.bitmap.nanos",
       "milvus.search.knowhere.calls",
       "milvus.search.knowhere.nanos",
@@ -194,7 +199,9 @@ class SearchMergeTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
       .schema
   }
 
-  test("the merge has a partition for every slot, task and few thousand queries") {
+  test(
+    "the merge has a partition for every slot, task and few thousand queries"
+  ) {
     // local[2]: two slots. A partition cannot hold part of a query, so one
     // query is one partition however wide the cluster is.
     MilvusSearch.mergePartitions(spark, 1L, 1) shouldBe 1

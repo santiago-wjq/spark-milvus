@@ -1,5 +1,7 @@
 package com.zilliz.spark.connector.read
 
+import java.util.concurrent.Semaphore
+
 import org.apache.arrow.memory.BufferAllocator
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.types.StructType
@@ -77,8 +79,14 @@ private[read] object SegmentSetSearch extends Logging {
       vectorsMaxBytes: Long,
       arrowMaxBytes: Long,
       slots: Int,
-      batchMaxBytes: Option[Long]
-  ) extends Serializable
+      batchMaxBytes: Option[Long],
+      indexLoadsMax: Int
+  ) extends Serializable {
+    require(
+      indexLoadsMax > 0,
+      s"A task set loads at least one index: $indexLoadsMax"
+    )
+  }
 
   def run(
       set: Seq[MilvusInputPartition],
@@ -266,6 +274,43 @@ private[read] object SegmentSetSearch extends Logging {
     packed.result()
   }
 
+  /** The loads one executor runs at once, by permit count. An index is copied
+    * into a BinarySet and then deserialized, so a load peaks at twice the
+    * index's bytes while the tasks that finished loading hold one times theirs:
+    * with `milvus.search.index.loads.max` the peak is bounded by the loads in
+    * flight rather than by the task slots, which is what lets a search use
+    * every core without sizing the executor for "every task loading at once"
+    * (docs/design/architecture/search-resources.html section 3.4).
+    *
+    * One semaphore per permit count, held only while the index is read: a task
+    * that has loaded searches beside the next task's load.
+    */
+  private val indexLoadPermits =
+    new java.util.concurrent.ConcurrentHashMap[Int, Semaphore]()
+
+  private def loading[A](permits: Int, metrics: SearchMetrics)(
+      load: => A
+  ): A = {
+    val gate = indexLoadPermits.computeIfAbsent(
+      permits,
+      new java.util.function.Function[Int, Semaphore] {
+        override def apply(count: Int): Semaphore = new Semaphore(count, true)
+      }
+    )
+    val waited = System.nanoTime()
+    gate.acquire()
+    metrics.indexLoadWaitNanos.add(System.nanoTime() - waited)
+    try load
+    finally gate.release()
+  }
+
+  /** [[loading]] for a test: the permits are an executor-wide bound, so a test
+    * needs to reach them without a segment to open.
+    */
+  private[read] def loadingForTest[A](permits: Int, metrics: SearchMetrics)(
+      load: => A
+  ): A = loading(permits, metrics)(load)
+
   /** What this segment offers the search: its vectors, or its index. */
   private def source(
       partition: MilvusInputPartition,
@@ -302,12 +347,14 @@ private[read] object SegmentSetSearch extends Logging {
           read(metrics, _)
         )
         metrics.bitmapNanos.add(System.nanoTime() - started)
-        val handle = SegmentIndexHandle.open(
-          task,
-          descriptor,
-          spec.layout,
-          spec.nullable
-        )
+        val handle = loading(spec.indexLoadsMax, metrics) {
+          SegmentIndexHandle.open(
+            task,
+            descriptor,
+            spec.layout,
+            spec.nullable
+          )
+        }
         metrics.indexBytes.add(handle.bytes)
         metrics.indexLoadNanos.add(handle.loadNanos)
         SegmentSearch.Index(task.segmentId, handle, excluded)

@@ -16,6 +16,7 @@ import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.storage.index.SearchPlan
 import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
+import com.zilliz.spark.connector.metrics.SearchMetrics
 
 /** How a query set too large to broadcast reaches the first stage: packed by
   * group on the executors, then delivered whole to every segment set, so a task
@@ -60,7 +61,8 @@ class SearchDeliveryTest
     vectorsMaxBytes = 1L << 20,
     arrowMaxBytes = 1L << 20,
     slots = 2,
-    batchMaxBytes = None
+    batchMaxBytes = None,
+    indexLoadsMax = 2
   )
 
   /** Eight queries the planner splits into four groups of two. */
@@ -227,5 +229,33 @@ class SearchDeliveryTest
       SearchQueries.packOnExecutors(bad, layout, "L2")
 
     failure.getMessage should include("not finite")
+  }
+
+  test("a load permit count bounds the loads in flight, not the task slots") {
+    val permits = 2
+    val tasks = 8
+    val inFlight = new java.util.concurrent.atomic.AtomicInteger(0)
+    val peak = new java.util.concurrent.atomic.AtomicInteger(0)
+    val metrics = SearchMetrics.create(spark.sparkContext)
+    val pool = java.util.concurrent.Executors.newFixedThreadPool(tasks)
+    try {
+      val done = (0 until tasks).map { _ =>
+        pool.submit(new java.util.concurrent.Callable[Int] {
+          override def call(): Int =
+            SegmentSetSearch.loadingForTest(permits, metrics) {
+              val now = inFlight.incrementAndGet()
+              peak.getAndUpdate(seen => math.max(seen, now))
+              Thread.sleep(40)
+              inFlight.decrementAndGet()
+              now
+            }
+        })
+      }
+      done.foreach(_.get())
+    } finally pool.shutdown()
+
+    peak.get should be <= permits
+    peak.get shouldBe permits
+    metrics.indexLoadWaitNanos.value.longValue should be > 0L
   }
 }

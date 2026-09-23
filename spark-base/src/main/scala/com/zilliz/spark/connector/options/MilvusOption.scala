@@ -84,6 +84,7 @@ object MilvusOption {
   val SearchQueriesMaxBytes = "milvus.search.queries.max.bytes"
   val SearchGroupMaxBytes = "milvus.search.group.max.bytes"
   val SearchVectorsMaxBytes = "milvus.search.vectors.max.bytes"
+  val SearchIndexLoadsMax = "milvus.search.index.loads.max"
   val WriteFileRollingBytes = "milvus.write.file.rolling.bytes"
   val MilvusFilter = "milvus.filter"
 

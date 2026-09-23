@@ -18,6 +18,7 @@ final class SearchMetrics private (
     val readNanos: LongAccumulator,
     val indexBytes: LongAccumulator,
     val indexLoadNanos: LongAccumulator,
+    val indexLoadWaitNanos: LongAccumulator,
     val bitmapNanos: LongAccumulator,
     val knowhereCalls: LongAccumulator,
     val knowhereNanos: LongAccumulator,
@@ -34,6 +35,7 @@ final class SearchMetrics private (
     SearchMetrics.ReadNanos -> readNanos,
     SearchMetrics.IndexBytes -> indexBytes,
     SearchMetrics.IndexLoadNanos -> indexLoadNanos,
+    SearchMetrics.IndexLoadWaitNanos -> indexLoadWaitNanos,
     SearchMetrics.BitmapNanos -> bitmapNanos,
     SearchMetrics.KnowhereCalls -> knowhereCalls,
     SearchMetrics.KnowhereNanos -> knowhereNanos,
@@ -57,6 +59,12 @@ object SearchMetrics {
   val ReadNanos = "milvus.search.read.nanos"
   val IndexBytes = "milvus.search.index.bytes"
   val IndexLoadNanos = "milvus.search.index.load.nanos"
+
+  /** What a task spent waiting for a load permit rather than loading. The
+    * permits bound the loads in flight, so this is what the bound cost, and it
+    * is time the other tasks of the executor spent searching.
+    */
+  val IndexLoadWaitNanos = "milvus.search.index.load.wait.nanos"
   val BitmapNanos = "milvus.search.bitmap.nanos"
   val KnowhereCalls = "milvus.search.knowhere.calls"
   val KnowhereNanos = "milvus.search.knowhere.nanos"
@@ -79,6 +87,7 @@ object SearchMetrics {
     context.longAccumulator(ReadNanos),
     context.longAccumulator(IndexBytes),
     context.longAccumulator(IndexLoadNanos),
+    context.longAccumulator(IndexLoadWaitNanos),
     context.longAccumulator(BitmapNanos),
     context.longAccumulator(KnowhereCalls),
     context.longAccumulator(KnowhereNanos),

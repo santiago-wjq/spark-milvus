@@ -24,6 +24,7 @@ import com.zilliz.milvus.storage.schema.{VectorElementType, VectorLayout}
 import com.zilliz.spark.connector.metrics.SearchMetrics
 import com.zilliz.spark.connector.options.{
   MilvusOption,
+  OptionParsing,
   SearchLimits,
   SearchResources,
   SnapshotReference
@@ -144,6 +145,16 @@ object MilvusSearch extends Logging {
     // the executor's memory limit and heap. The planner and the task take the
     // same value; a set that turns out larger streams instead of holding.
     val slots = MilvusSearch.taskSlotsPerExecutor(spark)
+    // How many of those slots load an index at once. A load peaks at twice the
+    // index's bytes, so "every slot loading" is the figure an executor would
+    // otherwise have to be sized for; bounding the loads lets the slots stay at
+    // the core count. Unset means every slot may load, which is what the
+    // connector did before the option existed.
+    val indexLoadsMax = OptionParsing.positiveInt(
+      key => Option(caseInsensitive.get(key)).map(_.trim).filter(_.nonEmpty),
+      MilvusOption.SearchIndexLoadsMax,
+      slots
+    )
     val (memoryLimit, heap) = MilvusSearch.executorMemory(spark)
     val budget = SearchResources.vectorsBudget(
       memoryLimit,
@@ -179,7 +190,8 @@ object MilvusSearch extends Logging {
       // chooses one for its own machine when it opens a segment.
       if (caseInsensitive.containsKey(MilvusOption.ReadBatchMaxBytes))
         Some(MilvusOption(caseInsensitive).readLimits.batchMaxBytes)
-      else None
+      else None,
+      indexLoadsMax
     )
 
     val metrics = SearchMetrics.create(spark.sparkContext)
@@ -227,7 +239,10 @@ object MilvusSearch extends Logging {
           .sum
       )
       val perTask = if (perSet.isEmpty) 0L else perSet.max
-      val perExecutor = perTask * 2L * slots
+      // The peak is the loads in flight at twice their bytes, plus what the
+      // slots that already loaded keep at one times theirs.
+      val perExecutor =
+        perTask * (indexLoadsMax.toLong + slots.toLong)
       val offHeap = memoryLimit.map(limit =>
         math.max(0L, limit - heap - SearchResources.JvmReserveBytes)
       )
@@ -237,7 +252,7 @@ object MilvusSearch extends Logging {
         else
           s"Search index memory: indexBytesPerTask=$perTask (largest set), " +
             s"loadPeak=${perTask * 2L} (BinarySet and the deserialized index), " +
-            s"perExecutor=$perExecutor over $slots slots, " +
+            s"perExecutor=$perExecutor over $slots slots ($indexLoadsMax loading at once), " +
             s"offHeapAvailable=${offHeap.map(_.toString).getOrElse("unknown")}"
       if (offHeap.exists(_ < perExecutor))
         logWarning(
