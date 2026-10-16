@@ -1,0 +1,60 @@
+name: Diagnose x86 candidate consumption
+
+# Temporary investigation branch; the normal release gate remains in ci.yml.
+on:
+  push:
+    branches: [codex/ci-consumer-repro]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  consumer:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: 514fa560c59ab0c94d751cd8fae8eeff9c37b4c9
+          persist-credentials: false
+          submodules: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: sbt/setup-sbt@v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-candidate-38848486858-1
+          run-id: 38848486858
+          github-token: ${{ github.token }}
+          path: candidate
+      - name: Record runner and exact candidate identity
+        run: |
+          mkdir -p consumer-results
+          lscpu > consumer-results/runner-cpu.txt
+          java -version 2> consumer-results/runner-java.txt
+          python3 scripts/release.py verify --candidate candidate
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          manifest = json.loads(Path('candidate/release-manifest.json').read_text())
+          assert manifest['plan']['sourceSha'] == 'cfa85fc08258ec10f4e28525d69ad465ee210231'
+          Path('consumer-results/replayed-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          PY
+      - name: Reproduce the x86 Spark 4.2 consumer with native crash evidence
+        run: |
+          python3 scripts/ci/consumer_smoke.py --candidate candidate \
+            --line 4.2 --platform linux-x86_64 --output consumer-results
+      - name: Preserve runner and native crash evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: x86-consumer-reproduction
+          path: consumer-results/
+          if-no-files-found: error
+          retention-days: 14
