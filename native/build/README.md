@@ -11,7 +11,8 @@ graph requires Talon's C++ filesystem, Rust feature and generated CXX bridge,
 so all three are compiled and provenance records `storage.talon=true`. Talon
 read routing remains disabled by the upstream default `fs.talon.mode=0`.
 Storage's C++ CRT transport remains disabled (`storage.crt=false`), so its
-optional `aws-c-s3` package is excluded from the unified dependency graph.
+optional `aws-c-s3` requirement is excluded from the version selection;
+`aws-crt-cpp` still requires `aws-c-s3`, whose revision is a transitive pin.
 Changing the storage gitlink requires a fresh native bundle; an older bundle
 does not provide the new authentication implementation.
 
@@ -20,8 +21,41 @@ upstream provenance and selects the newer version when their requirements
 conflict. Every direct package reference includes its exact upstream recipe
 revision. The build consumes those recipes without patching or exporting a
 project-owned replacement. Integration-specific link relationships are declared
-on the consuming targets in this project's CMake files. The build does not
-select an unpinned latest release.
+on the consuming targets in this project's CMake files. No direct reference
+selects an unpinned latest release.
+
+`transitive_references` pins the recipe revisions of the packages that
+`aws-sdk-cpp/1.11.842@milvus/dev` reaches by version alone: the `aws-c-*`
+libraries, `aws-checksums` and `aws-crt-cpp` it names, the `aws-c-s3` that
+`aws-crt-cpp` adds and the `s2n` that `aws-c-io` adds. Each pin is the only
+revision `default-conan-local2` publishes for its version. Conan takes a
+version its cache lacks from the first remote that has it, and conancenter,
+which precedes `default-conan-local2`, publishes `aws-c-compression/0.3.2`,
+`aws-c-event-stream/0.7.1`, `aws-c-http/0.11.0` and `aws-checksums/0.2.10` with
+recipes that require `aws-c-common/0.14.5`, while the SDK requires
+`aws-c-common/0.14.0`; the graph then does not resolve. The other nine versions
+are pinned as well, so a later conancenter recipe for any of them cannot change
+the graph either.
+
+A pin replaces each requirement of its version, or of a version range that
+admits it, with its revision; a recipe that requires another version is not
+forced back to the pinned one. The lock must select each pin for its package in
+the host graph and no other revision of a pinned version in either context, so
+a stale pin stops the build: Conan reports a version conflict while another
+recipe still requires the pinned version, and the lock check lists every stale
+pin otherwise. Pins apply to every profile, so each pinned package must be in
+every platform's host graph. When `aws-sdk-cpp` changes, read the requirements
+of its recipe and of the recipes it reaches on `default-conan-local2`
+(`conan download <reference> -r default-conan-local2 --only-recipe`), take each
+revision from `conan list '<name>/<version>#*' -r default-conan-local2`, and
+update the pins and this paragraph. Do not copy a revision from the error: it
+can name another remote's recipe.
+
+Packages without a direct reference or a transitive pin resolve to the newest
+revision of the required version, or the newest version a range admits, in the
+Conan cache, or on the first remote that has one when the cache has none; the
+lock records the result.
+
 `profiles/linux-x86_64` and `profiles/linux-aarch64` select GCC 12, C++20 and
 shared host dependencies; the two differ only in `arch`. `profiles/darwin-aarch64`
 and `profiles/darwin-x86_64` select Apple clang and differ in `arch`, the Apple
@@ -143,8 +177,9 @@ installing packages, and rejects a resumed build if its source tree or
 dependency inputs changed. Use a new work directory for changed inputs. Conan
 can still reuse packages from the previous build. `--conan-lock /path/conan.lock`
 reuses a reviewed full dependency lock in a new work directory. Its direct
-recipes must match the current selected revisions, and every resolved host and
-build dependency must remain in that lock. Without this argument, the first run
+recipes must match the current selected revisions, it must select each
+transitive pin, and every resolved host and build dependency must remain in
+that lock. Without this argument, the first run
 resolves and writes `provenance/conan.lock`; use that lock for later builds to
 preserve transitive versions as well as direct requirements. Jobs must be between 1 and
 50. Both engines share one `cmake-build/` Ninja tree. The driver first builds
@@ -160,11 +195,14 @@ from both pinned engine revisions for the selected OS and `--with-cardinal`,
 and rejects a selected conflict version unless it is the newer upstream
 requirement. Unknown conditions or dynamic requirements fail validation.
 `platform_scope` and `feature_scope` select the same direct graph for validation
-and Conan; for example, METIS is required only with Cardinal. Conan then resolves
-only the selected exact recipe references in `dependencies.json`; the full lock
-covers every host and build dependency. The driver writes the host and build profiles it passes to Conan
+and Conan; for example, METIS is required only with Cardinal. The consumer
+requires only the selected exact recipe references in `dependencies.json`;
+transitive pins are not requirements and apply to every platform and feature
+selection. The full lock covers every host and build dependency. The driver
+writes the host and build profiles it passes to Conan
 into the work directory: the checked-in profile of the host platform plus a
-`[replace_requires]` section naming every selected reference in `dependencies.json`,
+`[replace_requires]` section naming every selected reference in `dependencies.json`
+for any version and every transitive pin for its own version,
 without the `[options]` section for the build profile. The consumer's
 `force=True` requirements pin the host context only; without the replacements,
 build-context tools such as protoc resolve their zlib and openssl ranges to the
@@ -177,8 +215,9 @@ the unified consumers need. For example, storage links its public dependency
 set and keeps `aio` in the runtime closure explicitly, while Knowhere, DiskANN
 and Cardinal name their direct shared-library providers. These declarations do
 not modify Conan cache entries or dependency source trees. Provenance records
-the direct references, the two upstream dependency declarations, the selected
-versions, the complete lock and the resolved package graph.
+the direct references and transitive pins, the two upstream dependency
+declarations, the selected versions, the complete lock and the resolved package
+graph.
 
 The general and concurrency C API tests compile the pinned Knowhere test
 sources unchanged. The project-owned DiskANN acceptance fixture under
@@ -214,7 +253,7 @@ The resulting files are:
 | --- | --- |
 | `status.json` | Current phase and failure details |
 | `sources/` | Isolated engine source snapshots |
-| `dependency-input/`, `dependencies/` | Pinned direct requirements and Conan-generated CMake dependencies |
+| `dependency-input/`, `dependencies/` | Pinned direct requirements and transitive pins; Conan-generated CMake dependencies |
 | `provenance/` | Source identities, dependency selection, tool versions, lock, graph, compiler commands and full configuration trace |
 | `provenance/build-input/` | Full backup of this build implementation and its inputs |
 | `cmake-build/` | One CMake/Ninja tree for the Rust bridge, both engines, JNI and C API tests |

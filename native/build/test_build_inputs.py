@@ -10,9 +10,10 @@ from unittest.mock import patch
 
 import jvm_load
 import platforms
-from build import (knowhere_c_api_tests, cardinal_versions, digest, macos_openmp_redirect, platform_tool_requirements,
-                   prepare_conan_lock, promote_bundle, replace_requires_section, snapshot_corrosion, validate_conan_lock,
-                   validate_locked_graph)
+from build import (knowhere_c_api_tests, cardinal_versions, dependency_profiles, digest, macos_openmp_redirect,
+                   platform_tool_requirements, prepare_conan_lock, promote_bundle, replace_requires_section,
+                   snapshot_corrosion, validate_conan_lock, validate_locked_graph)
+from dependency_versions import selected_references, transitive_references
 
 
 class CardinalVersionTest(unittest.TestCase):
@@ -46,7 +47,7 @@ ENTRIES = jvm_load.JVM_LOAD_ENTRIES
 class BuildContextPinTest(unittest.TestCase):
     def test_every_selected_reference_replaces_its_recipe_in_both_contexts(self):
         references = {"zlib": "zlib/1.3.1#8045", "grpc": "grpc/1.67.1@milvus/dev#efea"}
-        section = replace_requires_section(references)
+        section = replace_requires_section(references, {})
         self.assertEqual(section, "[replace_requires]\ngrpc/*: grpc/1.67.1@milvus/dev#efea\nzlib/*: zlib/1.3.1#8045\n")
 
     def test_milvus_common_takes_openmp_from_the_graph_only_where_llvm_openmp_is_selected(self):
@@ -65,9 +66,33 @@ class BuildContextPinTest(unittest.TestCase):
         self.assertEqual("milvus-common/*:tools.system.package_manager:mode=report", mode)
 
     def test_replacements_keep_the_exact_recipe_revision(self):
-        section = replace_requires_section({"openssl": "openssl/3.3.2#9f9f"})
+        section = replace_requires_section({"openssl": "openssl/3.3.2#9f9f"}, {})
         self.assertIn("openssl/*: openssl/3.3.2#9f9f", section)
         self.assertNotIn("openssl/*: openssl/3.3.2\n", section)
+
+    def test_transitive_pin_replaces_requirements_of_its_version_only(self):
+        section = replace_requires_section({"zlib": "zlib/1.3.1#8045"},
+                                           {"s2n": "s2n/1.7.4#336e", "aws-c-common": "aws-c-common/0.14.0#0e4d",
+                                            "tool": "tool/2.0@org/stable#9a9a"})
+        self.assertEqual("[replace_requires]\nzlib/*: zlib/1.3.1#8045\n"
+                         "aws-c-common/0.14.0: aws-c-common/0.14.0#0e4d\n"
+                         "s2n/1.7.4: s2n/1.7.4#336e\n"
+                         "tool/2.0@org/stable: tool/2.0@org/stable#9a9a\n", section)
+
+    def test_both_profiles_carry_every_checked_in_transitive_pin(self):
+        directory = Path(__file__).parent
+        constraints = json.loads((directory / "dependencies.json").read_text())
+        transitive = transitive_references(constraints)
+        for platform, conan_os in (("linux-aarch64", "Linux"), ("darwin-aarch64", "Macos")):
+            with self.subTest(platform=platform):
+                references = selected_references(constraints, conan_os=conan_os, with_cardinal=False)
+                host, build = dependency_profiles((directory / "profiles" / platform).read_text(),
+                                                  references, transitive)
+                self.assertIn("[options]", host)
+                self.assertNotIn("[options]", build)
+                for text in (host, build):
+                    for reference in transitive.values():
+                        self.assertIn("\n" + reference.split("#", 1)[0] + ": " + reference + "\n", text)
 
 
 class BundlePromotionTest(unittest.TestCase):
@@ -140,49 +165,95 @@ class ConanLockTest(unittest.TestCase):
         self.destination = self.root / "conan.lock"
         self.identity = self.root / "conan-lock.sha256"
         self.references = {"grpc": "grpc/1.0#direct"}
+        self.transitive = {}
         self.record = {"version": "0.5", "requires": ["grpc/1.0#direct%123", "c-ares/1.0#transitive%456"],
                        "build_requires": ["protoc/1.0#tool"], "python_requires": [], "config_requires": []}
         self.source.write_text(json.dumps(self.record))
 
     def test_prior_lock_is_copied_verbatim_and_reused_on_resume(self):
-        prepare_conan_lock(self.source, self.destination, self.identity, self.references)
-        prepare_conan_lock(None, self.destination, self.identity, self.references)
+        prepare_conan_lock(self.source, self.destination, self.identity, self.references, self.transitive)
+        prepare_conan_lock(None, self.destination, self.identity, self.references, self.transitive)
         self.assertEqual(self.source.read_bytes(), self.destination.read_bytes())
         self.assertEqual(digest(self.source), self.identity.read_text().strip())
 
     def test_changed_input_is_rejected_without_replacing_recorded_lock(self):
-        prepare_conan_lock(self.source, self.destination, self.identity, self.references)
+        prepare_conan_lock(self.source, self.destination, self.identity, self.references, self.transitive)
         original = self.destination.read_bytes()
         self.record["requires"][1] = "c-ares/2.0#different"
         self.source.write_text(json.dumps(self.record))
         with self.assertRaisesRegex(ValueError, "lock changed"):
-            prepare_conan_lock(self.source, self.destination, self.identity, self.references)
+            prepare_conan_lock(self.source, self.destination, self.identity, self.references, self.transitive)
         self.assertEqual(original, self.destination.read_bytes())
 
     def test_modified_recorded_lock_is_rejected(self):
-        prepare_conan_lock(self.source, self.destination, self.identity, self.references)
+        prepare_conan_lock(self.source, self.destination, self.identity, self.references, self.transitive)
         self.destination.write_text(json.dumps(self.record, indent=2))
         with self.assertRaisesRegex(ValueError, "Recorded Conan lock was modified"):
-            prepare_conan_lock(None, self.destination, self.identity, self.references)
+            prepare_conan_lock(None, self.destination, self.identity, self.references, self.transitive)
 
     def test_lock_must_match_pinned_direct_recipe_revisions(self):
         with self.assertRaisesRegex(ValueError, "selected direct recipes"):
-            validate_conan_lock(self.source, {"grpc": "grpc/1.0#new-patch"})
+            validate_conan_lock(self.source, {"grpc": "grpc/1.0#new-patch"}, self.transitive)
 
     def test_lock_must_pin_transitive_recipe_revisions(self):
         self.record["requires"][1] = "c-ares/1.0"
         self.source.write_text(json.dumps(self.record))
         with self.assertRaisesRegex(ValueError, "pin every recipe revision"):
-            validate_conan_lock(self.source, self.references)
+            validate_conan_lock(self.source, self.references, self.transitive)
+
+    def rejection(self, transitive):
+        with self.assertRaises(ValueError) as raised:
+            validate_conan_lock(self.source, self.references, transitive)
+        return str(raised.exception)
+
+    def test_lock_must_select_each_transitive_pin_in_the_host_graph(self):
+        # The pinned revision in both contexts, and another version that only a
+        # build tool requires, leave the pin intact.
+        self.record["build_requires"] += ["c-ares/1.0#transitive%789", "c-ares/1.1#tool%790"]
+        self.source.write_text(json.dumps(self.record))
+        validate_conan_lock(self.source, self.references, {"c-ares": "c-ares/1.0#transitive"})
+        # Another revision, a recipe that moved to another version, a package no
+        # recipe requires any more, and a package only the build context has.
+        for pin, found in (("c-ares/1.0#reviewed", "c-ares/1.0#transitive"),
+                           ("c-ares/0.9#transitive", "c-ares/1.0#transitive"),
+                           ("zstd/1.5.5#reviewed", "absent"),
+                           ("protoc/1.0#tool", "absent")):
+            with self.subTest(pin=pin):
+                self.assertIn("transitive pins: " + pin + " (lock: " + found + ")",
+                              self.rejection({pin.split("/", 1)[0]: pin}))
+
+    def test_another_revision_of_a_pinned_version_is_rejected_in_either_context(self):
+        self.record["build_requires"].append("c-ares/1.0#other%789")
+        self.source.write_text(json.dumps(self.record))
+        self.assertIn("c-ares/1.0#transitive (lock: c-ares/1.0#other, c-ares/1.0#transitive)",
+                      self.rejection({"c-ares": "c-ares/1.0#transitive"}))
+
+    def test_every_stale_transitive_pin_is_reported_at_once(self):
+        self.assertIn("c-ares/1.0#reviewed (lock: c-ares/1.0#transitive); zstd/1.5.5#reviewed (lock: absent)",
+                      self.rejection({"c-ares": "c-ares/1.0#reviewed", "zstd": "zstd/1.5.5#reviewed"}))
+
+    def test_created_or_resumed_lock_must_select_the_transitive_pins(self):
+        # CI creates the lock instead of supplying one; its pins are checked before it is recorded.
+        self.destination.write_text(json.dumps(self.record))
+        with self.assertRaisesRegex(ValueError, "transitive pins"):
+            prepare_conan_lock(None, self.destination, self.identity, self.references,
+                               {"c-ares": "c-ares/1.0#reviewed"})
+        self.assertFalse(self.identity.exists())
+
+    def test_supplied_lock_must_select_the_transitive_pins(self):
+        with self.assertRaisesRegex(ValueError, "transitive pins: c-ares/1.0#reviewed"):
+            prepare_conan_lock(self.source, self.destination, self.identity, self.references,
+                               {"c-ares": "c-ares/1.0#reviewed"})
+        self.assertFalse(self.destination.exists())
 
     def test_only_profile_declared_platform_tools_may_omit_recipe_revision(self):
         profile = self.root / "profile"
         profile.write_text("[settings]\nos=Linux\n[platform_tool_requires]\ncmake/3.27.5\n[options]\nfmt/*:shared=True\n")
         self.record["build_requires"].append("cmake/3.27.5")
         self.source.write_text(json.dumps(self.record))
-        validate_conan_lock(self.source, self.references, platform_tool_requirements(profile))
+        validate_conan_lock(self.source, self.references, self.transitive, platform_tool_requirements(profile))
         with self.assertRaisesRegex(ValueError, "pin every recipe revision"):
-            validate_conan_lock(self.source, self.references)
+            validate_conan_lock(self.source, self.references, self.transitive)
 
     def test_graph_cannot_resolve_an_unlocked_transitive_or_build_dependency(self):
         graph = {"0": {"ref": "consumer/1", "context": "host", "recipe": "Consumer"},
