@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import unittest
 
-from dependency_versions import selected_references, validate_upstream_versions
+from dependency_versions import selected_references, transitive_references, validate_upstream_versions
 
 
 class VersionSelectionTest(unittest.TestCase):
@@ -23,6 +23,31 @@ class VersionSelectionTest(unittest.TestCase):
         for name, reference in self.constraints["references"].items():
             with self.subTest(name=name):
                 self.assertRegex(reference, r"^[^/]+/[^#]+#[0-9a-f]{32}$")
+
+    def test_transitive_pins_are_exact_recipe_revisions_outside_the_direct_graph(self):
+        pinned = transitive_references(self.constraints)
+        self.assertTrue(pinned)
+        for name, reference in pinned.items():
+            with self.subTest(name=name):
+                self.assertRegex(reference, r"^[^/]+/[^#]+#[0-9a-f]{32}$")
+                self.assertNotIn(name, self.constraints["references"])
+
+    def test_transitive_pin_cannot_duplicate_a_direct_reference(self):
+        self.constraints["transitive_references"]["zlib"] = self.constraints["references"]["zlib"]
+        with self.assertRaisesRegex(ValueError, "duplicates a direct reference: zlib"):
+            transitive_references(self.constraints)
+
+    def test_transitive_pin_must_name_its_own_package(self):
+        self.constraints["transitive_references"]["aws-c-common"] = "aws-c-io/0.27.0#" + "0" * 32
+        with self.assertRaisesRegex(ValueError, "names another package: aws-c-common"):
+            transitive_references(self.constraints)
+
+    def test_transitive_pin_must_name_an_exact_recipe_revision(self):
+        for reference in ("aws-c-common/0.14.0", "aws-c-common/0.14.0#0e4d", "aws-c-common/0.14.0#" + "0" * 32 + "%1"):
+            with self.subTest(reference=reference):
+                self.constraints["transitive_references"]["aws-c-common"] = reference
+                with self.assertRaisesRegex(ValueError, "exact recipe revision"):
+                    transitive_references(self.constraints)
 
     def test_selects_newer_numeric_and_reviewed_commit_versions(self):
         storage = '\n'.join(['self.requires("fmt/11.2.0#old")',

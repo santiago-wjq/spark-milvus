@@ -40,6 +40,22 @@
     "zlib": "zlib/1.3.1#8045430172a5f8d56ba001b14561b4ea",
     "zstd": "zstd/1.5.5#70dc5eb8ea16708fc946fbac884c507e"
   },
+  "transitive_references": {
+    "_comment": "Recipe revisions for transitive versions that a selected recipe requires without one; native/build/README.md explains which and why. Each replaces requirements of its version, and the lock must select it.",
+    "aws-c-auth": "aws-c-auth/0.10.3#040e2c4d5e63a3f977a435b900f4328f",
+    "aws-c-cal": "aws-c-cal/0.9.14#ff065fa6ef295dfa471777759f5f4224",
+    "aws-c-common": "aws-c-common/0.14.0#0e4d6e002ba52c8e7fd7974a42aee3cf",
+    "aws-c-compression": "aws-c-compression/0.3.2#902c2a73ebcd61039ec1376beb067206",
+    "aws-c-event-stream": "aws-c-event-stream/0.7.1#2cff773a69a926fe775dfe21f6c15650",
+    "aws-c-http": "aws-c-http/0.11.0#e2ac016ecdecd1b5356b599c470a9543",
+    "aws-c-io": "aws-c-io/0.27.0#7febc5f1ef63d56f64066baee6355eda",
+    "aws-c-mqtt": "aws-c-mqtt/0.16.0#a163c1d6c90e14709cad43824fd82f6a",
+    "aws-c-s3": "aws-c-s3/0.12.6#3f68ac70485bdffed0f22e8cd584ec17",
+    "aws-c-sdkutils": "aws-c-sdkutils/0.2.5#2a932b7ffd4607d9a1c50d1f5d1ef2eb",
+    "aws-checksums": "aws-checksums/0.2.10#acf7d2ddabe0cdf08d83e362d4185333",
+    "aws-crt-cpp": "aws-crt-cpp/0.40.1#c85891382919486534ac53902c013750",
+    "s2n": "s2n/1.7.4#336e2b808cbd06dd4aa1c0bc82135dc1"
+  },
   "platform_scope": {
     "_comment": "References upstream declares for one operating system only; the engines' own conanfiles gate these the same way. llvm-openmp is the OpenMP runtime Apple Clang does not ship, held to the deployment-target baseline like every other library; a Homebrew bottle states the macOS release it was built on instead.",
     "liburing": [

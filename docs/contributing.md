@@ -329,9 +329,12 @@ every other dependency; a Homebrew bottle would carry the macOS release it was
 built on instead.
 `--with-cardinal` also needs access to both pinned Cardinal
 revisions. `dependencies.json` selects the newer version when the two source
-recipes conflict. Every dependency uses the exact upstream recipe revision in
-`native/build/dependencies.json`; the repository does not export replacement
-recipes or rewrite cached recipes. Integration-specific link relationships live
+recipes conflict. Every direct dependency uses the exact upstream recipe
+revision in `native/build/dependencies.json`. Each version listed in its
+`transitive_references`, such as the AWS SDK's `aws-c-*` packages, uses the
+revision `default-conan-local2` publishes, and the lock records the remaining
+transitive packages. The repository does not export replacement recipes or
+rewrite cached recipes. Integration-specific link relationships live
 in `native/build/cmake/Storage.cmake`, `Knowhere.cmake` and `Cardinal.cmake`.
 Conan can reuse a cached package only when the recipe revision, configuration
 and package ID match.

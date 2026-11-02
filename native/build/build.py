@@ -199,7 +199,7 @@ def platform_tool_requirements(profile):
     return references
 
 
-def replace_requires_section(references):
+def replace_requires_section(references, transitive):
     """Pin the build context to the recipe revisions selected for the host context.
 
     The consumer's force=True requirements shape the host graph only. Tools such as
@@ -209,11 +209,30 @@ def replace_requires_section(references):
     rewrite the build-context ranges to the host revisions and then fail because those
     revisions are absent from build_requires. Declaring the same revisions in both
     profiles makes one graph resolve identically with and without the lock.
+
+    A transitive pin replaces requirements of its version, and of a version range
+    that admits it, with its revision. A recipe that requires another version is
+    not forced back to the pinned one: Conan then reports a version conflict while
+    another recipe still requires the pinned version, and validate_conan_lock
+    reports the pin as stale otherwise.
     """
     lines = ["[replace_requires]"]
     for reference in sorted(references.values()):
         lines.append(f"{reference.split('/', 1)[0]}/*: {reference}")
+    for reference in sorted(transitive.values()):
+        lines.append(f"{reference.split('#', 1)[0]}: {reference}")
     return "\n".join(lines) + "\n"
+
+
+def dependency_profiles(profile_text, references, transitive):
+    """The host and build profile texts the driver passes to Conan.
+
+    Host options must not turn build-only protoc/tool packages into runtime
+    libraries, so the build profile omits the [options] section.
+    """
+    replacements = replace_requires_section(references, transitive)
+    return (profile_text.rstrip("\n") + "\n\n" + replacements,
+            profile_text.split("[options]")[0].rstrip("\n") + "\n\n" + replacements)
 
 
 def macos_openmp_redirect(references, generators):
@@ -242,7 +261,7 @@ def macos_openmp_redirect(references, generators):
             "-c:h", "milvus-common/*:tools.system.package_manager:mode=report"]
 
 
-def validate_conan_lock(path, references, platform_tools=()):
+def validate_conan_lock(path, references, transitive, platform_tools=()):
     """Require concrete recipe revisions; Conan checks the complete graph next."""
     lock = json.loads(path.read_text())
     if lock.get("version") != "0.5":
@@ -261,19 +280,33 @@ def validate_conan_lock(path, references, platform_tools=()):
     missing = set(references.values()) - locked
     if missing:
         raise ValueError("Conan lock does not match selected direct recipes: " + ", ".join(sorted(missing)))
+    # A recipe that now requires another version of a transitively pinned
+    # package, or no longer requires it, escapes the replacement. The pin selects
+    # its package in the host graph and the revision of its version anywhere; a
+    # build tool may still require another version of the same package.
+    tools = {value.split("%", 1)[0] for value in lock.get("build_requires", [])}
+    stale = []
+    for name, reference in sorted(transitive.items()):
+        version = reference.split("#", 1)[0]
+        found = sorted({value for value in locked if value.split("/", 1)[0] == name}
+                       | {value for value in tools if value.split("#", 1)[0] == version and value != reference})
+        if found != [reference]:
+            stale.append(reference + " (lock: " + (", ".join(found) or "absent") + ")")
+    if stale:
+        raise ValueError("Conan lock does not select the transitive pins: " + "; ".join(stale))
     return lock
 
 
-def prepare_conan_lock(provided, destination, identity, references, platform_tools=()):
+def prepare_conan_lock(provided, destination, identity, references, transitive, platform_tools=()):
     """Preserve a supplied lock byte-for-byte and reject changed resume inputs."""
     if provided is not None:
-        validate_conan_lock(provided, references, platform_tools)
+        validate_conan_lock(provided, references, transitive, platform_tools)
         if destination.exists() and digest(destination) != digest(provided):
             raise ValueError("Conan lock changed; use a new work directory")
         if not destination.exists():
             shutil.copy2(provided, destination)
     if destination.exists():
-        validate_conan_lock(destination, references, platform_tools)
+        validate_conan_lock(destination, references, transitive, platform_tools)
         expected = digest(destination)
         if identity.exists() and identity.read_text().strip() != expected:
             raise ValueError("Recorded Conan lock was modified; use a new work directory")
@@ -500,7 +533,7 @@ def build(args, repository, java_home, work, target, profile):
             shutil.copytree(repository / "native/build", build_inputs / "native/build",
                             ignore=shutil.ignore_patterns("__pycache__"))
             shutil.copy2(repository / "scripts/build-native.sh", build_inputs / "build-native.sh")
-        from dependency_versions import selected_references, validate_upstream_versions
+        from dependency_versions import selected_references, transitive_references, validate_upstream_versions
         storage_recipe = (git_value(args.storage_source, "show", storage_pin + ":cpp/conanfile.py")
                           if (args.storage_source / ".git").exists()
                           else (storage / "cpp/conanfile.py").read_text())
@@ -518,26 +551,27 @@ def build(args, repository, java_home, work, target, profile):
         # Validate the lock against the same platform and feature selection as Conan.
         references = selected_references(
             constraints, conan_os=conan_os, with_cardinal=args.with_cardinal)
+        transitive = transitive_references(constraints)
         consumer = work / "dependency-input"
         consumer.mkdir(exist_ok=True)
         shutil.copy2(repository / "native/build/conanfile.py", consumer / "conanfile.py")
         shutil.copy2(repository / "native/build/dependencies.json", consumer / "dependencies.json")
         (provenance / "direct-references.json").write_text(json.dumps(references, indent=2) + "\n")
         platform_tools = platform_tool_requirements(profile)
-        replacements = replace_requires_section(references)
+        host_text, build_text = dependency_profiles(profile.read_text(), references, transitive)
         host_profile = work / "host-profile"
-        host_profile.write_text(profile.read_text().rstrip("\n") + "\n\n" + replacements)
+        host_profile.write_text(host_text)
         shutil.copy2(host_profile, provenance / "host-profile")
-        # Host options must not turn build-only protoc/tool packages into runtime libraries.
         build_profile = work / "build-profile"
-        build_profile.write_text(profile.read_text().split("[options]")[0].rstrip("\n") + "\n\n" + replacements)
+        build_profile.write_text(build_text)
         dependencies = work / "dependencies"
         profiles = ["-pr:h", host_profile, "-pr:b", build_profile,
                     "-c:h", "tools.build:jobs=" + str(args.jobs), "-c:b", "tools.build:jobs=" + str(args.jobs)]
         openmp_generators = work / "openmp-config"
         options = [*profiles, "-o:h", "with_cardinal=" + str(args.with_cardinal),
                    *macos_openmp_redirect(references, openmp_generators)]
-        inputs = {"references": references, "hostProfile": host_profile.read_text(),
+        inputs = {"references": references, "transitiveReferences": transitive,
+                  "hostProfile": host_profile.read_text(),
                   "consumerSha256": digest(consumer / "conanfile.py"),
                   "dependencySelectionSha256": digest(consumer / "dependencies.json"),
                   "withCardinal": args.with_cardinal,
@@ -545,7 +579,7 @@ def build(args, repository, java_home, work, target, profile):
         input_file = provenance / "dependency-input.json"
         lockfile = provenance / "conan.lock"
         lock_identity = provenance / "conan-lock.sha256"
-        prepare_conan_lock(args.conan_lock, lockfile, lock_identity, references, platform_tools)
+        prepare_conan_lock(args.conan_lock, lockfile, lock_identity, references, transitive, platform_tools)
         if input_file.exists() and json.loads(input_file.read_text()) != inputs:
             raise RuntimeError("Dependency constraints changed; use a new work directory")
         input_file.write_text(json.dumps(inputs, indent=2) + "\n")
@@ -553,7 +587,7 @@ def build(args, repository, java_home, work, target, profile):
         if not lockfile.exists():
             run(["conan", "lock", "create", consumer, *options,
                  *(["--no-remote"] if args.no_remote else []), "--lockfile-out", lockfile], env=env)
-        prepare_conan_lock(None, lockfile, lock_identity, references, platform_tools)
+        prepare_conan_lock(None, lockfile, lock_identity, references, transitive, platform_tools)
         metadata["conanLockSha256"] = digest(lockfile)
         phase("build-unified-dependencies")
         if "llvm-openmp" in references:
@@ -567,7 +601,7 @@ def build(args, repository, java_home, work, target, profile):
              *(["--no-remote"] if args.no_remote else [])],
             output=provenance / "conan-graph.json", env=env)
         graph = json.loads((provenance / "conan-graph.json").read_text())["graph"]["nodes"]
-        validate_locked_graph(graph, validate_conan_lock(lockfile, references, platform_tools))
+        validate_locked_graph(graph, validate_conan_lock(lockfile, references, transitive, platform_tools))
         # A recipe that cannot build a shared library on this system is static
         # here too; the engines' own conanfiles select the same option, and
         # dependencies.json records which references those are.

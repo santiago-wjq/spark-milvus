@@ -18,6 +18,24 @@ def selected_references(constraints, *, conan_os, with_cardinal):
             and (name not in feature_scope or features[feature_scope[name]])}
 
 
+def transitive_references(constraints):
+    """Recipe revisions for transitive versions that selected recipes require without one.
+
+    A package is either a direct reference, which the consumer requires itself,
+    or a transitive pin, never both.
+    """
+    pinned = {name: reference for name, reference in constraints.get("transitive_references", {}).items()
+              if name != "_comment"}
+    for name, reference in pinned.items():
+        if name in constraints["references"]:
+            raise ValueError("Transitive pin duplicates a direct reference: " + name)
+        if not re.fullmatch(r"[^/#]+/[^#]+#[0-9a-f]{32}", reference):
+            raise ValueError("Transitive pin must name an exact recipe revision: " + reference)
+        if reference.split("/", 1)[0] != name:
+            raise ValueError("Transitive pin names another package: " + name + ": " + reference)
+    return pinned
+
+
 def _requirements(source, *, conan_os, options):
     """Read the pinned recipes' literal requirements without executing Conan code.
 
