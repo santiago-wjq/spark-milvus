@@ -35,7 +35,7 @@ Five production modules, with dependencies only pointing downward.
 
 The layer-1 modules live in `native/runtime`, `native/storage` and
 `native/vector`, and the unified native build that produces the platform bundle
-is `native/build/`; the project IDs keep their `native-` names. The three
+is `native/build/`; the project IDs keep their `native-` names. The
 submodules stay at the repository root.
 
 The root aggregates those modules and publishes no artifact. `integration`
@@ -52,7 +52,9 @@ source JARs contain only the selected roots. See [README.md](README.md).
 
 Three git submodules: `milvus-proto`, `milvus-storage` and `knowhere` supply
 the protobuf definitions and the two native engines and must be initialized to
-build.
+build. A fourth, `milvus`, is used only by the segcore integration under
+development in `native/segcore` (see its README); the modules above do not
+read it.
 
 ## Rules any change has to satisfy
 
