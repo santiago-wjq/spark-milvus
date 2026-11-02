@@ -12,19 +12,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Build libmilvus_core, the plan parser and the segcore JNI with Milvus's own build.
+"""Build libmilvus_core and the segcore JNI with Milvus's own build.
 
 The Milvus submodule is the parent build: its conanfile selects every package
-and option, its CMake compiles Knowhere and milvus-storage from their pinned
-sources, and its scripts generate the protobuf sources and the plan parser.
-This driver only supplies what Milvus leaves to its environment:
+and option, and its CMake compiles Knowhere and milvus-storage from their pinned
+sources. This driver only supplies what Milvus leaves to its environment:
 
 * the Conan profile (settings only, so the recipe's default_options apply),
 * a work directory outside the source tree, linked as milvus/cmake_build
   because the Milvus scripts hard-code that path,
+* the C++ protobuf sources, generated from this repository's milvus-proto
+  submodule, which must be the commit Milvus's go.mod names,
 * -DWITH_JNI=ON, which turns on the upstream JNI targets of Knowhere and
   milvus-storage inside the same build,
 * the segcore JNI library, compiled against the installed Milvus output.
+
+The Go plan parser is not built: the connector builds planpb.PlanNode itself.
 """
 import argparse
 import os
@@ -40,6 +43,8 @@ MILVUS = ROOT / "milvus"
 CORE = MILVUS / "internal" / "core"
 OUTPUT = CORE / "output"
 JNI_SOURCE = ROOT / "native" / "segcore" / "src" / "main" / "cpp"
+MILVUS_PROTO = ROOT / "milvus-proto"
+PROTO_MODULE = "github.com/milvus-io/milvus-proto/go-api/v3"
 
 # Rust toolchain the Milvus scripts install for the storage bridge and tantivy.
 MILVUS_RUST = "1.94.1"
@@ -84,13 +89,41 @@ def cpp_proto_commands():
     return protos
 
 
+def git(repo, *args):
+    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
+                          text=True).stdout.strip()
+
+
+def check_milvus_proto():
+    """The milvus-proto gitlink must be the version Milvus's go.mod requires.
+
+    A pseudo-version ends in the commit's 12-character prefix; any other
+    version is a tag of the milvus-proto repository.
+    """
+    gomod = (MILVUS / "go.mod").read_text()
+    m = re.search(r"^\s*" + re.escape(PROTO_MODULE) + r"\s+(\S+)", gomod, re.M)
+    if not m:
+        sys.exit(f"{PROTO_MODULE} is not required by milvus/go.mod")
+    version = m.group(1)
+    head = git(MILVUS_PROTO, "rev-parse", "HEAD")
+    pseudo = re.fullmatch(r"v\d+\.\d+\.\d+-(?:\S+\.)?\d{14}-([0-9a-f]{12})", version)
+    if pseudo:
+        wanted = pseudo.group(1)
+        ok = head.startswith(wanted)
+    else:
+        wanted = git(MILVUS_PROTO, "rev-parse", f"{version}^{{commit}}")
+        ok = head == wanted
+    if not ok:
+        sys.exit(f"milvus-proto is at {head[:12]}, but milvus/go.mod requires {version} ({wanted[:12]}); "
+                 "move the milvus-proto gitlink with the milvus gitlink")
+
+
 def generate_proto(work, env):
-    run(["bash", MILVUS / "scripts" / "download_milvus_proto.sh"], cwd=MILVUS, env=env)
+    check_milvus_proto()
     protoc = work / "bin" / "protoc"
-    api = work / "thirdparty" / "milvus-proto" / "proto"
     pb = CORE / "src" / "pb"
     for proto in cpp_proto_commands():
-        run([protoc, f"--proto_path={api}", "--proto_path=.", f"--cpp_out={pb}", proto],
+        run([protoc, f"--proto_path={MILVUS_PROTO / 'proto'}", "--proto_path=.", f"--cpp_out={pb}", proto],
             cwd=MILVUS / "pkg" / "proto", env=env)
 
 
@@ -99,7 +132,6 @@ def build_core(env, jobs):
     env["CMAKE_EXTRA_ARGS"] = "-DWITH_JNI=ON"
     if jobs:
         env["CMAKE_BUILD_PARALLEL_LEVEL"] = str(jobs)
-    run(["bash", MILVUS / "scripts" / "build_plan_parser.sh"], cwd=MILVUS, env=env)
     run(["bash", MILVUS / "scripts" / "core_build.sh", "-t", "Release"], cwd=MILVUS, env=env)
 
 

@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// JNI over the segcore C interface (internal/core/src/**/*_c.h) and the
-// plan parser's C exports. Every entry point maps to one C call; protobuf
-// messages cross as byte arrays and handles cross as jlong. Nothing here
-// reaches into segcore's C++ classes.
+// JNI over the segcore C interface (internal/core/src/**/*_c.h). Every entry
+// point maps to one C call; protobuf messages cross as byte arrays and handles
+// cross as jlong. Nothing here reaches into segcore's C++ classes. Plans arrive
+// as serialized planpb.PlanNode built by the caller; the Go plan parser is not
+// linked.
 
 #include <jni.h>
 
@@ -32,18 +33,6 @@
 #include "segcore/plan_c.h"
 #include "segcore/segcore_init_c.h"
 #include "segcore/segment_c.h"
-
-extern "C" {
-// Exported by libmilvus-planparser (internal/parser/planparserv2/cwrapper).
-long long
-RegisterSchema(void* protoBlob, int length, char** errMsg);
-int
-UnregisterSchema(long long schemaID, char** errMsg);
-void*
-Parse(long long schemaID, char* exprStr, int* length, char** errMsg);
-void
-Free(void* ptr);
-}
 
 namespace {
 
@@ -150,50 +139,6 @@ Java_com_zilliz_milvus_jni_segcore_SegcoreNative_newCollection(JNIEnv* env, jcla
 JNIEXPORT void JNICALL
 Java_com_zilliz_milvus_jni_segcore_SegcoreNative_deleteCollection(JNIEnv*, jclass, jlong collection) {
     DeleteCollection(reinterpret_cast<CCollection>(collection));
-}
-
-JNIEXPORT jlong JNICALL
-Java_com_zilliz_milvus_jni_segcore_SegcoreNative_registerSchema(JNIEnv* env, jclass, jbyteArray schema) {
-    auto blob = Bytes(env, schema);
-    char* err = nullptr;
-    long long handle = RegisterSchema(blob.data(), static_cast<int>(blob.size()), &err);
-    if (err != nullptr) {
-        std::string msg = std::string("RegisterSchema: ") + err;
-        free(err);
-        ThrowSegcore(env, -1, msg);
-        return 0;
-    }
-    return static_cast<jlong>(handle);
-}
-
-JNIEXPORT void JNICALL
-Java_com_zilliz_milvus_jni_segcore_SegcoreNative_unregisterSchema(JNIEnv* env, jclass, jlong handle) {
-    char* err = nullptr;
-    UnregisterSchema(static_cast<long long>(handle), &err);
-    if (err != nullptr) {
-        std::string msg = std::string("UnregisterSchema: ") + err;
-        free(err);
-        ThrowSegcore(env, -1, msg);
-    }
-}
-
-JNIEXPORT jbyteArray JNICALL
-Java_com_zilliz_milvus_jni_segcore_SegcoreNative_parse(JNIEnv* env, jclass, jlong handle, jstring expr) {
-    const char* chars = env->GetStringUTFChars(expr, nullptr);
-    std::string text(chars);
-    env->ReleaseStringUTFChars(expr, chars);
-    int length = 0;
-    char* err = nullptr;
-    void* plan = Parse(static_cast<long long>(handle), text.data(), &length, &err);
-    if (err != nullptr) {
-        std::string msg = std::string("Parse: ") + err;
-        free(err);
-        ThrowSegcore(env, -1, msg);
-        return nullptr;
-    }
-    jbyteArray out = ToArray(env, plan, length);
-    Free(plan);
-    return out;
 }
 
 JNIEXPORT jlong JNICALL

@@ -28,11 +28,10 @@ endif()
 find_package(JNI REQUIRED)
 
 find_library(MILVUS_CORE milvus_core PATHS "${MILVUS_OUTPUT}/lib" NO_DEFAULT_PATH REQUIRED)
-find_library(MILVUS_PLANPARSER milvus-planparser PATHS "${MILVUS_OUTPUT}/lib" NO_DEFAULT_PATH REQUIRED)
 
 add_library(milvus-segcore-jni SHARED segcore_jni.cpp)
 target_include_directories(milvus-segcore-jni PRIVATE "${MILVUS_OUTPUT}/include" ${JNI_INCLUDE_DIRS})
-target_link_libraries(milvus-segcore-jni PRIVATE "${MILVUS_CORE}" "${MILVUS_PLANPARSER}")
+target_link_libraries(milvus-segcore-jni PRIVATE "${MILVUS_CORE}")
 # The library sits next to libmilvus_core and its dependency closure.
 set_target_properties(milvus-segcore-jni PROPERTIES
   BUILD_RPATH "${MILVUS_OUTPUT}/lib"

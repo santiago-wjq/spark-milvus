@@ -3,10 +3,9 @@ package com.zilliz.milvus.jni.segcore;
 /**
  * Static JNI entries, one per segcore or plan parser C call.
  *
- * <p>Load libmilvus-segcore-jni before the first call; it links
- * libmilvus_core and libmilvus-planparser from the same Milvus build.
- * HotSpot must start with its own JRE's libjsig preloaded, because the plan
- * parser starts a Go runtime that installs signal handlers.
+ * <p>Load libmilvus-segcore-jni before the first call; it links libmilvus_core
+ * from the same Milvus build as the Knowhere and storage JNI. HotSpot must start
+ * with its own JRE's libjsig preloaded, as Knowhere requires.
  */
 public final class SegcoreNative {
     private SegcoreNative() {}
@@ -19,13 +18,6 @@ public final class SegcoreNative {
 
     public static native void deleteCollection(long collection);
 
-    /** Plan parser RegisterSchema; the handle is independent of any collection. */
-    public static native long registerSchema(byte[] schema);
-
-    public static native void unregisterSchema(long handle);
-
-    /** Plan parser Parse: a boolean expression to a serialized planpb.PlanNode. */
-    public static native byte[] parse(long schemaHandle, String expression);
 
     /** CreateRetrievePlanByExpr from a serialized planpb.PlanNode. */
     public static native long createRetrievePlan(long collection, byte[] planNode);

@@ -32,18 +32,32 @@ implementation in the JVM.
   call and never includes segcore's C++ headers. When the `milvus` gitlink
   moves, the diff of the installed `*_c.h` headers is the complete list of
   interface changes to review.
-- **Expressions compile through the plan parser.** `libmilvus-planparser` is
-  Milvus's Go expression compiler built as a C shared library, so filters get
-  the same rewrites as online queries. Its Go runtime shares the JVM process;
-  HotSpot must preload its own `libjsig`.
+- **Plans are built in the JVM; the Go plan parser is not used.** segcore
+  takes a serialized `planpb.PlanNode`, not an expression string. The
+  connector's input is Spark's predicate tree, so it builds the PlanNode
+  directly instead of printing an expression and parsing it back. This keeps
+  a Go runtime out of the executor JVM, and with it the plan parser's
+  configuration loading: its first `paramtable.Get()` builds a BaseTable that
+  by default creates an etcd client for `localhost:2379` and refreshes from it
+  every five seconds. The obligations the parser would otherwise meet move
+  here: type checking against the schema, constant conversion, and sorted,
+  distinct `IN` value lists, which segcore relies on regardless of the
+  rewriter's optimization switch. `plan.proto` changes show in the gitlink
+  diff, as `*_c.h` changes do.
+- **One milvus-proto for the repository.** The C++ protobuf sources are
+  generated from this repository's `milvus-proto` submodule, using the
+  `--cpp_out` list of Milvus's `scripts/generate_proto.sh`. `build.py` fails
+  unless that gitlink is the version `milvus/go.mod` requires, so the
+  submodule moves together with the `milvus` gitlink. Milvus's own
+  `download_milvus_proto.sh` is not run.
 - **The `milvus` submodule is opt-in.** `.gitmodules` sets `update = none`
   and CI initializes submodules by name, so only this build clones Milvus.
 
 ## Build
 
 Prerequisites are those of the Milvus C++ build (Conan 2.25.1, CMake, Ninja,
-GCC 12, Rust through rustup, Go for the plan parser, libaio for DiskANN) plus
-a JDK named by `JAVA_HOME`.
+GCC 12, Rust through rustup, libaio for DiskANN) plus a JDK named by
+`JAVA_HOME`.
 
 ```bash
 git submodule update --init --checkout milvus
@@ -61,15 +75,21 @@ rebuilds just `libmilvus-segcore-jni` against an existing output.
 native/segcore/build/run_probe.sh
 ```
 
-`SegcoreProbe` loads the JNI, registers a schema with the plan parser, inserts
-rows into a growing segment and checks filtered retrieves, under
-`-Xcheck:jni`. It exercises the two feasibility gates of the integration:
-the libraries of one Milvus build load together in HotSpot, and the plan
-parser's Go runtime runs inside it.
+`SegcoreProbe` loads the JNI, inserts rows into a growing segment and checks
+retrieves for comparison, prefix, `IN`, `AND`, `OR` and `NOT` plans built in
+the JVM, under `-Xcheck:jni`. It exercises the build feasibility gate: the
+libraries of one Milvus build load and run together in HotSpot. The growing
+segment and insert entries exist only for this probe; the connector reads
+sealed segments, and they go once sealed loading is in place.
 
 ## Not yet done
 
 - sbt module, packaging into the platform bundle and loading through
   `native-runtime`.
-- Sealed segments loaded from V3 manifests, deletes, and search.
+- Sealed segments loaded from V3 manifests, remote storage initialization,
+  deletes, Arrow export of results, cancellation, and search.
+- Spark predicate to PlanNode translation.
+- Knowhere and milvus-storage gitlinks moved to the Milvus pins and passed to
+  the Milvus build through `FETCHCONTENT_SOURCE_DIR_*`, so no source is
+  fetched twice.
 - Replacing `native/build` for Knowhere and storage with this build.

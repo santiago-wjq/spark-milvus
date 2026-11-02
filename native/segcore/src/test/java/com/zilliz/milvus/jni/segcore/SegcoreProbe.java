@@ -7,12 +7,13 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * End-to-end probe of the segcore JNI in one JVM: plan parser, collection,
- * growing segment insert and filtered retrieve.
+ * End-to-end probe of the segcore JNI in one JVM: collection, growing segment
+ * insert, and retrieves with plans built in the JVM.
  *
- * <p>It answers the two feasibility gates of the integration. The libraries
- * come from one Milvus build (gate 1), and the plan parser's Go runtime runs
- * inside HotSpot (gate 2). Run it with the JRE's libjsig preloaded and
+ * <p>It answers the build feasibility gate: the libraries of one Milvus build
+ * load and run together in HotSpot. Plans are planpb.PlanNode messages built
+ * here, as the connector will build them from Spark predicates, so no Go plan
+ * parser is involved. Run it with the JRE's libjsig preloaded and
  * java.library.path naming the Milvus output lib directory; it exits non-zero
  * on the first mismatch. Protobuf messages are encoded by hand so the probe
  * needs no generated classes; field numbers follow schema.proto,
@@ -25,6 +26,16 @@ public final class SegcoreProbe {
     private static final int INT64 = 5;
     private static final int VARCHAR = 21;
 
+    // plan.proto OpType
+    private static final int GREATER_THAN = 1;
+    private static final int LESS_THAN = 3;
+    private static final int EQUAL = 5;
+    private static final int PREFIX_MATCH = 7;
+    // BinaryExpr.BinaryOp and UnaryExpr.UnaryOp
+    private static final int AND = 1;
+    private static final int OR = 2;
+    private static final int NOT = 1;
+
     private static final long[] PKS = {1, 2, 3, 4, 5, 6};
     private static final long[] AGES = {10, 25, 30, 45, 50, 65};
     private static final String[] NAMES = {"alice", "bob", "carol", "dave", "erin", "frank"};
@@ -35,9 +46,7 @@ public final class SegcoreProbe {
         System.loadLibrary("milvus-segcore-jni");
         SegcoreNative.init(Runtime.getRuntime().availableProcessors());
 
-        byte[] schema = schema();
-        long collection = SegcoreNative.newCollection(schema);
-        long parser = SegcoreNative.registerSchema(schema);
+        long collection = SegcoreNative.newCollection(schema());
         long segment = SegcoreNative.newGrowingSegment(collection, 1);
         try {
             long[] timestamps = new long[PKS.length];
@@ -45,41 +54,97 @@ public final class SegcoreProbe {
             SegcoreNative.insert(segment, PKS.clone(), timestamps, insertRecord());
             check("row count", SegcoreNative.rowCount(segment), PKS.length);
 
-            expect(collection, parser, segment, "age > 28 and age < 60", 3, 4, 5);
-            expect(collection, parser, segment, "name like \"c%\"", 3);
-            expect(collection, parser, segment, "pk in [2, 6]", 2, 6);
-            expect(collection, parser, segment, "age > 28 and name != \"dave\"", 3, 5, 6);
-            expect(collection, parser, segment, "age < 0");
+            expect(collection, segment, "age > 28 and age < 60",
+                and(range(AGE, INT64, GREATER_THAN, int64(28)), range(AGE, INT64, LESS_THAN, int64(60))), 3, 4, 5);
+            expect(collection, segment, "name starts with c", range(NAME, VARCHAR, PREFIX_MATCH, string("c")), 3);
+            expect(collection, segment, "pk in [6, 2, 6]", term(PK, INT64, 6, 2, 6), 2, 6);
+            expect(collection, segment, "age > 28 and not name == dave",
+                and(range(AGE, INT64, GREATER_THAN, int64(28)), not(range(NAME, VARCHAR, EQUAL, string("dave")))),
+                3, 5, 6);
+            expect(collection, segment, "age < 15 or name == frank",
+                or(range(AGE, INT64, LESS_THAN, int64(15)), range(NAME, VARCHAR, EQUAL, string("frank"))), 1, 6);
+            expect(collection, segment, "age < 0", range(AGE, INT64, LESS_THAN, int64(0)));
             try {
-                SegcoreNative.parse(parser, "no_such_field > 1");
-                throw new AssertionError("parse accepted an unknown field");
+                SegcoreNative.createRetrievePlan(collection, plan(range(999, INT64, EQUAL, int64(1))));
+                throw new AssertionError("a plan over an unknown field was accepted");
             } catch (SegcoreException expected) {
-                System.out.println("rejected: " + expected.getMessage());
+                System.out.println("rejected (code " + expected.code() + "): " + expected.getMessage());
             }
         } finally {
             SegcoreNative.deleteSegment(segment);
-            SegcoreNative.unregisterSchema(parser);
             SegcoreNative.deleteCollection(collection);
         }
         System.out.println("segcore probe passed");
     }
 
-    private static void expect(long collection, long parser, long segment, String expr, long... want) {
-        byte[] planNode = SegcoreNative.parse(parser, expr);
-        // Proto concatenation merges: append output_field_ids (PlanNode field 3).
-        Proto outputs = new Proto().packedInt64(3, PK, AGE);
-        long plan = SegcoreNative.createRetrievePlan(collection, concat(planNode, outputs.bytes()));
+    private static void expect(long collection, long segment, String label, Proto predicate, long... want) {
+        long plan = SegcoreNative.createRetrievePlan(collection, plan(predicate));
         try {
             byte[] results = SegcoreNative.retrieve(segment, plan, 1000, 1L << 30);
             long[] got = retrievedPks(results);
             Arrays.sort(got);
             if (!Arrays.equals(got, want)) {
-                throw new AssertionError(expr + ": want " + Arrays.toString(want) + ", got " + Arrays.toString(got));
+                throw new AssertionError(label + ": want " + Arrays.toString(want) + ", got " + Arrays.toString(got));
             }
-            System.out.println("ok: " + expr + " -> " + Arrays.toString(got));
+            System.out.println("ok: " + label + " -> " + Arrays.toString(got));
         } finally {
             SegcoreNative.deleteRetrievePlan(plan);
         }
+    }
+
+    // planpb.PlanNode{query=4 -> QueryPlanNode{predicates=1}, output_field_ids=3}
+    private static byte[] plan(Proto predicate) {
+        Proto query = new Proto().message(1, predicate);
+        return new Proto().message(4, query).packedInt64(3, PK, AGE).bytes();
+    }
+
+    // planpb.ColumnInfo{field_id=1, data_type=2, is_primary_key=3}
+    private static Proto column(long field, int type) {
+        return new Proto().int64(1, field).int64(2, type).bool(3, field == PK);
+    }
+
+    // planpb.Expr.unary_range_expr=5 -> UnaryRangeExpr{column_info=1, op=2, value=3}
+    private static Proto range(long field, int type, int op, Proto value) {
+        Proto expr = new Proto().message(1, column(field, type)).int64(2, op).message(3, value);
+        return new Proto().message(5, expr);
+    }
+
+    // planpb.Expr.term_expr=1 -> TermExpr{column_info=1, values=2}. segcore
+    // relies on sorted, distinct values (the plan parser's rewriter guarantees
+    // it for online queries), so the list is normalized here.
+    private static Proto term(long field, int type, long... values) {
+        Proto expr = new Proto().message(1, column(field, type));
+        for (long v : Arrays.stream(values).sorted().distinct().toArray()) {
+            expr.message(2, int64(v));
+        }
+        return new Proto().message(1, expr);
+    }
+
+    // planpb.Expr.binary_expr=3 -> BinaryExpr{op=1, left=2, right=3}
+    private static Proto and(Proto left, Proto right) {
+        return binary(AND, left, right);
+    }
+
+    private static Proto or(Proto left, Proto right) {
+        return binary(OR, left, right);
+    }
+
+    private static Proto binary(int op, Proto left, Proto right) {
+        return new Proto().message(3, new Proto().int64(1, op).message(2, left).message(3, right));
+    }
+
+    // planpb.Expr.unary_expr=2 -> UnaryExpr{op=1, child=2}
+    private static Proto not(Proto child) {
+        return new Proto().message(2, new Proto().int64(1, NOT).message(2, child));
+    }
+
+    // planpb.GenericValue{int64_val=2, string_val=4}
+    private static Proto int64(long v) {
+        return new Proto().int64(2, v);
+    }
+
+    private static Proto string(String v) {
+        return new Proto().string(4, v);
     }
 
     private static void check(String what, long got, long want) {
@@ -134,12 +199,6 @@ public final class SegcoreProbe {
             return new long[0];
         }
         return Reader.packedInt64(Reader.field(intIds, 1));
-    }
-
-    private static byte[] concat(byte[] a, byte[] b) {
-        byte[] out = Arrays.copyOf(a, a.length + b.length);
-        System.arraycopy(b, 0, out, a.length, b.length);
-        return out;
     }
 
     /** Minimal protobuf writer for the probe's messages. */
