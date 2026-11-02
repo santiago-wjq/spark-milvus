@@ -10,8 +10,13 @@ package com.zilliz.milvus.jni.segcore;
 public final class SegcoreNative {
     private SegcoreNative() {}
 
-    /** SegcoreInit with default configuration, then InitCpuNum. Call once per JVM. */
-    public static native void init(int cpuNum);
+    /**
+     * SegcoreInit with default configuration, InitCpuNum, then the local chunk
+     * manager rooted at {@code localDir} and the mmap manager under
+     * {@code localDir/mmap}, limited to {@code mmapDiskLimitBytes}. Every mmap
+     * kind starts disabled; segments still need the manager. Call once per JVM.
+     */
+    public static native void init(int cpuNum, String localDir, long mmapDiskLimitBytes);
 
     /** NewCollection from a serialized schemapb.CollectionSchema. */
     public static native long newCollection(byte[] schema);

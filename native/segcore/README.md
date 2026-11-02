@@ -24,14 +24,32 @@ implementation in the JVM.
 - **The Conan profile carries settings only.** Profile `[options]` override a
   recipe's `default_options`, so `build/profiles/*` names the compiler and
   standard library and leaves every package option to the Milvus conanfile.
-- **Knowhere and storage JNI come from the same build.** `-DWITH_JNI=ON` is
-  the upstream option of both engines; Milvus passes it through when given in
-  `CMAKE_EXTRA_ARGS`, which `scripts/core_build.sh` accepts.
+- **Knowhere and storage JNI are meant to come from the same build, but do
+  not yet.** `-DWITH_JNI=ON` is the upstream option of both engines, and
+  `scripts/core_build.sh` passes `CMAKE_EXTRA_ARGS` through. milvus-storage's
+  JNI target then fails after linking: its post-build step copies to
+  `${CMAKE_SOURCE_DIR}/../java/`, which names a directory outside its tree
+  when Milvus is the top-level project; `CMAKE_CURRENT_SOURCE_DIR` is the
+  intended base. Until that is fixed in milvus-storage, `build.py` passes
+  `-DWITH_JNI=OFF` and the connector keeps the Knowhere and storage JNI from
+  `native/build`.
 - **The JNI is maintained here, over the C interface only.** Milvus does not
   ship a JNI. `src/main/cpp/segcore_jni.cpp` maps one Java method to one C
   call and never includes segcore's C++ headers. When the `milvus` gitlink
   moves, the diff of the installed `*_c.h` headers is the complete list of
   interface changes to review.
+- **The JNI library is segcore's logging host.** segcore sends glog lines
+  through a sink that calls `goZapLogExt`. On Linux `libmilvus_core` only
+  declares it (the weak stub exists for macOS, an empty one under
+  `WITHOUT_GO_LOGGING`); Milvus's Go binary exports the definition. The JNI
+  library defines it instead, writing to stderr, and the dynamic linker
+  resolves `libmilvus_core`'s reference to it because both load in one
+  `dlopen` scope. Building with `WITHOUT_GO_LOGGING` would discard the logs.
+- **Process initialization is explicit.** `SegcoreNative.init` runs
+  `SegcoreInit`, `InitCpuNum`, the local chunk manager rooted at a directory
+  the caller owns and the mmap manager under it. Segments need the mmap
+  manager even with every mmap kind off, which follows Milvus's queryNode
+  defaults.
 - **Plans are built in the JVM; the Go plan parser is not used.** segcore
   takes a serialized `planpb.PlanNode`, not an expression string. The
   connector's input is Spark's predicate tree, so it builds the PlanNode
@@ -89,6 +107,8 @@ sealed segments, and they go once sealed loading is in place.
 - Sealed segments loaded from V3 manifests, remote storage initialization,
   deletes, Arrow export of results, cancellation, and search.
 - Spark predicate to PlanNode translation.
+- The milvus-storage JNI copy fix, then Knowhere and storage JNI from this
+  build.
 - Knowhere and milvus-storage gitlinks moved to the Milvus pins and passed to
   the Milvus build through `FETCHCONTENT_SOURCE_DIR_*`, so no source is
   fetched twice.

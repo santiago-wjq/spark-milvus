@@ -23,8 +23,7 @@ sources. This driver only supplies what Milvus leaves to its environment:
   because the Milvus scripts hard-code that path,
 * the C++ protobuf sources, generated from this repository's milvus-proto
   submodule, which must be the commit Milvus's go.mod names,
-* -DWITH_JNI=ON, which turns on the upstream JNI targets of Knowhere and
-  milvus-storage inside the same build,
+* -DWITH_JNI=OFF for now (see build_core),
 * the segcore JNI library, compiled against the installed Milvus output.
 
 The Go plan parser is not built: the connector builds planpb.PlanNode itself.
@@ -58,13 +57,20 @@ def run(cmd, cwd=None, env=None):
 def link_work_dir(work):
     """Point milvus/cmake_build at the work directory."""
     link = MILVUS / "cmake_build"
-    if link.is_symlink():
-        if link.resolve() == work.resolve():
-            return
+    if link.is_symlink() and link.resolve() != work.resolve():
         link.unlink()
-    elif link.exists():
+    elif link.exists() and not link.is_symlink():
         sys.exit(f"{link} exists and is not a symlink; move it away first")
-    link.symlink_to(work)
+    if not link.is_symlink():
+        link.symlink_to(work)
+    # Milvus ignores a cmake_build directory, not a link of that name; exclude
+    # it locally so the submodule stays clean without changing tracked files.
+    exclude = pathlib.Path(git(MILVUS, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude"))
+    entries = exclude.read_text().splitlines() if exclude.exists() else []
+    if "/cmake_build" not in entries:
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        with exclude.open("a") as f:
+            f.write("/cmake_build\n")
 
 
 def conan_install(work, profile, env):
@@ -129,7 +135,13 @@ def generate_proto(work, env):
 
 def build_core(env, jobs):
     env = dict(env)
-    env["CMAKE_EXTRA_ARGS"] = "-DWITH_JNI=ON"
+    # The engines' JNI stays off: milvus-storage's JNI post-build step copies
+    # to ${CMAKE_SOURCE_DIR}/../java/, which resolves outside its own tree
+    # when Milvus is the top-level project, and the build fails. Explicit OFF
+    # also clears a cached ON from an earlier configure. Until storage uses
+    # CMAKE_CURRENT_SOURCE_DIR, the connector's Knowhere and storage JNI come
+    # from native/build.
+    env["CMAKE_EXTRA_ARGS"] = "-DWITH_JNI=OFF"
     if jobs:
         env["CMAKE_BUILD_PARALLEL_LEVEL"] = str(jobs)
     run(["bash", MILVUS / "scripts" / "core_build.sh", "-t", "Release"], cwd=MILVUS, env=env)
@@ -168,6 +180,9 @@ def main():
     work.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env["RUSTUP_TOOLCHAIN"] = MILVUS_RUST
+    # Cargo's built-in git client ignores git's own URL rewrites and
+    # credentials; the CLI applies the same configuration git checkouts use.
+    env["CARGO_NET_GIT_FETCH_WITH_CLI"] = "true"
 
     if not args.only_jni:
         conan_install(work, profile, env)

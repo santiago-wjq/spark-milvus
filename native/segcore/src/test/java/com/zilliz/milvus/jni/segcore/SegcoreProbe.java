@@ -44,7 +44,8 @@ public final class SegcoreProbe {
 
     public static void main(String[] args) {
         System.loadLibrary("milvus-segcore-jni");
-        SegcoreNative.init(Runtime.getRuntime().availableProcessors());
+        String localDir = args.length > 0 ? args[0] : System.getProperty("java.io.tmpdir") + "/segcore-probe";
+        SegcoreNative.init(Runtime.getRuntime().availableProcessors(), localDir, 1L << 30);
 
         long collection = SegcoreNative.newCollection(schema());
         long segment = SegcoreNative.newGrowingSegment(collection, 1);
@@ -198,7 +199,9 @@ public final class SegcoreProbe {
         if (intIds == null) {
             return new long[0];
         }
-        return Reader.packedInt64(Reader.field(intIds, 1));
+        // An empty LongArray omits its data field.
+        byte[] data = Reader.field(intIds, 1);
+        return data == null ? new long[0] : Reader.packedInt64(data);
     }
 
     /** Minimal protobuf writer for the probe's messages. */

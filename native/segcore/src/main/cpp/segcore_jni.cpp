@@ -21,6 +21,7 @@
 #include <jni.h>
 
 #include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -33,6 +34,7 @@
 #include "segcore/plan_c.h"
 #include "segcore/segcore_init_c.h"
 #include "segcore/segment_c.h"
+#include "storage/storage_c.h"
 
 namespace {
 
@@ -119,10 +121,41 @@ ToArray(JNIEnv* env, const void* data, int64_t size) {
 
 extern "C" {
 
+// segcore routes glog through a sink that calls goZapLogExt, which on Linux
+// the host process must define: Milvus's Go binary exports it. Here the JNI
+// library is the host, and the dynamic linker resolves libmilvus_core's
+// reference to this definition, since both load in one dlopen scope. Lines
+// go to stderr, where executor logs are collected.
+__attribute__((visibility("default"))) void
+goZapLogExt(int severity, const char* file, int file_len, int line, const char* msg, int msg_len) {
+    static const char kLevels[] = "IWEF";
+    char level = severity >= 0 && severity < 4 ? kLevels[severity] : '?';
+    std::fprintf(stderr, "segcore %c %.*s:%d] %.*s\n", level, file_len, file, line, msg_len, msg);
+}
+
+// The local chunk manager roots at localDir; the mmap manager, which segments
+// require even with mmap off, uses localDir/mmap. Mmap settings follow
+// Milvus's queryNode defaults: read-ahead "willneed", 64 MiB allocation
+// blocks, every mmap kind off.
 JNIEXPORT void JNICALL
-Java_com_zilliz_milvus_jni_segcore_SegcoreNative_init(JNIEnv*, jclass, jint cpuNum) {
+Java_com_zilliz_milvus_jni_segcore_SegcoreNative_init(JNIEnv* env, jclass, jint cpuNum, jstring localDir,
+                                                       jlong mmapDiskLimitBytes) {
     SegcoreInit(nullptr);
     InitCpuNum(cpuNum);
+    const char* chars = env->GetStringUTFChars(localDir, nullptr);
+    std::string root(chars);
+    env->ReleaseStringUTFChars(localDir, chars);
+    if (!CheckStatus(env, InitLocalChunkManagerSingleton(root.c_str()), "InitLocalChunkManagerSingleton")) {
+        return;
+    }
+    std::string mmap = root + "/mmap";
+    CMmapConfig config{};
+    config.cache_read_ahead_policy = "willneed";
+    config.mmap_path = mmap.c_str();
+    config.disk_limit = static_cast<uint64_t>(mmapDiskLimitBytes);
+    config.fix_file_size = 64ULL << 20;
+    config.json_stats_mmap_path = mmap.c_str();
+    CheckStatus(env, InitMmapManager(config), "InitMmapManager");
 }
 
 JNIEXPORT jlong JNICALL
