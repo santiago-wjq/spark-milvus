@@ -38,13 +38,27 @@ implementation in the JVM.
   call and never includes segcore's C++ headers. When the `milvus` gitlink
   moves, the diff of the installed `*_c.h` headers is the complete list of
   interface changes to review.
-- **The JNI library is segcore's logging host.** segcore sends glog lines
-  through a sink that calls `goZapLogExt`. On Linux `libmilvus_core` only
-  declares it (the weak stub exists for macOS, an empty one under
-  `WITHOUT_GO_LOGGING`); Milvus's Go binary exports the definition. The JNI
-  library defines it instead, writing to stderr, and the dynamic linker
-  resolves `libmilvus_core`'s reference to it because both load in one
-  `dlopen` scope. Building with `WITHOUT_GO_LOGGING` would discard the logs.
+- **The JNI library is segcore's logging host, and its lines go to log4j.**
+  segcore sends glog lines through a sink that calls `goZapLogExt`. On Linux
+  `libmilvus_core` only declares it (the weak stub exists for macOS, an empty
+  one under `WITHOUT_GO_LOGGING`); Milvus's Go binary exports the definition
+  and writes to zap. The JNI library defines it instead, and the dynamic
+  linker resolves `libmilvus_core`'s reference to it because both load in one
+  `dlopen` scope. The sink is process-wide, so Knowhere's and
+  milvus-storage's glog lines take the same path. `goZapLogExt` calls
+  `SegcoreLog`, which writes through slf4j to the executor's log4j
+  configuration under `com.zilliz.milvus.jni.segcore.native.segcore`,
+  `.knowhere` and `.storage`; executor logs then carry native lines in the
+  same files, layout and level control as the connector's own. segcore logs
+  from its own pool threads: they are attached to the JVM as daemons on their
+  first line and detached when they exit, and the class and method are
+  resolved in `JNI_OnLoad`, because `FindClass` on an attached native thread
+  sees only the system class loader. Lines below the level in force at load
+  time are dropped before crossing into the JVM. FATAL lines are also written
+  to stderr, since glog aborts right after them. Two kinds of output stay on
+  stderr: glog lines before `SegcoreInit` installs the sink (Knowhere's
+  version banner) and text segcore prints without glog. Building with
+  `WITHOUT_GO_LOGGING` would discard the logs.
 - **Process initialization is explicit.** `SegcoreNative.init` runs
   `SegcoreInit`, `InitCpuNum`, the local chunk manager rooted at a directory
   the caller owns and the mmap manager under it. Segments need the mmap

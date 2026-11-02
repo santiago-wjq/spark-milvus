@@ -19,7 +19,9 @@
 // linked.
 
 #include <jni.h>
+#include <pthread.h>
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -117,20 +119,140 @@ ToArray(JNIEnv* env, const void* data, int64_t size) {
     return out;
 }
 
+// Logging host state, set by JNI_OnLoad.
+constexpr jint kJniVersion = JNI_VERSION_1_8;
+constexpr const char* kLogClass = "com/zilliz/milvus/jni/segcore/SegcoreLog";
+constexpr int kFatal = 3;  // glog FATAL
+
+std::atomic<JavaVM*> g_vm{nullptr};
+jclass g_log_class = nullptr;
+jmethodID g_log_method = nullptr;
+std::atomic<int> g_log_threshold{0};
+pthread_key_t g_detach_key;
+
+void
+WriteStderr(int severity, const char* file, int file_len, int line, const char* msg, int msg_len) {
+    static const char kLevels[] = "IWEF";
+    char level = severity >= 0 && severity < 4 ? kLevels[severity] : '?';
+    std::fprintf(stderr, "segcore %c %.*s:%d] %.*s\n", level, file_len, file, line, msg_len, msg);
+}
+
+// Runs when a thread this library attached exits.
+void
+DetachOnExit(void*) {
+    if (JavaVM* vm = g_vm.load()) {
+        vm->DetachCurrentThread();
+    }
+}
+
+// The calling thread's JNIEnv. segcore logs from its own pool threads, which
+// are attached as daemons on their first line, under their native names, and
+// detached when they exit. Returns null when there is no usable VM.
+JNIEnv*
+LogEnv() {
+    JavaVM* vm = g_vm.load();
+    if (vm == nullptr) {
+        return nullptr;
+    }
+    JNIEnv* env = nullptr;
+    jint rc = vm->GetEnv(reinterpret_cast<void**>(&env), kJniVersion);
+    if (rc == JNI_OK) {
+        return env;
+    }
+    if (rc != JNI_EDETACHED) {
+        return nullptr;
+    }
+    char name[16] = "segcore-native";
+    pthread_getname_np(pthread_self(), name, sizeof(name));
+    JavaVMAttachArgs args{kJniVersion, name, nullptr};
+    if (vm->AttachCurrentThreadAsDaemon(reinterpret_cast<void**>(&env), &args) != JNI_OK) {
+        return nullptr;
+    }
+    pthread_setspecific(g_detach_key, env);
+    return env;
+}
+
 }  // namespace
 
 extern "C" {
 
+JNIEXPORT jint JNICALL
+JNI_OnLoad(JavaVM* vm, void*) {
+    JNIEnv* env = nullptr;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), kJniVersion) != JNI_OK) {
+        return JNI_ERR;
+    }
+    // Resolved here, on the thread that loads the library: FindClass on a
+    // native thread attached later searches the system class loader, which
+    // does not see the connector's classes under Spark.
+    jclass cls = env->FindClass(kLogClass);
+    if (cls == nullptr) {
+        return JNI_ERR;
+    }
+    jmethodID threshold = env->GetStaticMethodID(cls, "threshold", "()I");
+    jmethodID log = env->GetStaticMethodID(cls, "log", "(I[BI[B)V");
+    if (threshold == nullptr || log == nullptr) {
+        return JNI_ERR;
+    }
+    jint min_severity = env->CallStaticIntMethod(cls, threshold);
+    if (env->ExceptionCheck()) {
+        return JNI_ERR;
+    }
+    if (pthread_key_create(&g_detach_key, DetachOnExit) != 0) {
+        return JNI_ERR;
+    }
+    g_log_class = static_cast<jclass>(env->NewGlobalRef(cls));
+    g_log_method = log;
+    g_log_threshold.store(min_severity);
+    g_vm.store(vm);
+    return kJniVersion;
+}
+
 // segcore routes glog through a sink that calls goZapLogExt, which on Linux
-// the host process must define: Milvus's Go binary exports it. Here the JNI
-// library is the host, and the dynamic linker resolves libmilvus_core's
-// reference to this definition, since both load in one dlopen scope. Lines
-// go to stderr, where executor logs are collected.
+// the host process must define: Milvus's Go binary exports it and writes the
+// lines to zap. Here the JNI library is the host, and the dynamic linker
+// resolves libmilvus_core's reference to this definition, since both load in
+// one dlopen scope. The sink is process-wide, so Knowhere's and
+// milvus-storage's glog lines arrive here too. They go to SegcoreLog and from
+// there to the executor's log4j configuration.
 __attribute__((visibility("default"))) void
 goZapLogExt(int severity, const char* file, int file_len, int line, const char* msg, int msg_len) {
-    static const char kLevels[] = "IWEF";
-    char level = severity >= 0 && severity < 4 ? kLevels[severity] : '?';
-    std::fprintf(stderr, "segcore %c %.*s:%d] %.*s\n", level, file_len, file, line, msg_len, msg);
+    if (severity < g_log_threshold.load(std::memory_order_relaxed)) {
+        return;
+    }
+    // glog aborts after a FATAL line, before an asynchronous appender may
+    // have written it; stderr keeps it.
+    if (severity >= kFatal) {
+        WriteStderr(severity, file, file_len, line, msg, msg_len);
+    }
+    JNIEnv* env = LogEnv();
+    // No VM (before load or while it exits), or a Java thread with an
+    // exception pending, which must not call into Java.
+    if (env == nullptr || env->ExceptionCheck()) {
+        if (severity < kFatal) {
+            WriteStderr(severity, file, file_len, line, msg, msg_len);
+        }
+        return;
+    }
+    // An attached native thread has no Java frame to release local
+    // references, so the frame is pushed and popped here.
+    if (env->PushLocalFrame(2) != JNI_OK) {
+        env->ExceptionClear();
+        return;
+    }
+    jbyteArray jfile = ToArray(env, file, file_len);
+    jbyteArray jmsg = ToArray(env, msg, msg_len);
+    if (jfile != nullptr && jmsg != nullptr) {
+        env->CallStaticVoidMethod(g_log_class, g_log_method, static_cast<jint>(severity), jfile,
+                                  static_cast<jint>(line), jmsg);
+    }
+    if (env->ExceptionCheck()) {
+        // A failing appender must not surface as an exception in an
+        // unrelated Java call on this thread; the line still goes out.
+        env->ExceptionClear();
+        WriteStderr(severity, file, file_len, line, msg, msg_len);
+    }
+    env->PopLocalFrame(nullptr);
 }
 
 // The local chunk manager roots at localDir; the mmap manager, which segments
