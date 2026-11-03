@@ -8,10 +8,13 @@ extracts, and the sbt build does not compile it.
 
 Scalar filtering, retrieval and the rest of Milvus's per-segment execution
 live in segcore (`milvus/internal/core`), behind the C interface Milvus's own
-Go code calls (`internal/core/src/**/*_c.h`). Using that execution layer gives
-the connector the same expression semantics, index path selection and
-operator pipeline as an online Milvus query, instead of a second
-implementation in the JVM.
+Go code calls (`internal/core/src/**/*_c.h`). The connector uses that
+execution layer to decide which rows of a segment its reads and searches
+exclude. It brings what a JVM evaluator would otherwise have to rebuild and
+then track across Milvus releases: the scalar index families and their
+per-segment selection, chunk skipping, columnar and reordered evaluation, and
+the JSON, array and text expressions, with the semantics of an online Milvus
+query wherever Milvus's semantics are the ones that apply.
 
 ## Decisions
 
@@ -75,7 +78,37 @@ implementation in the JVM.
   here: type checking against the schema, constant conversion, and sorted,
   distinct `IN` value lists, which segcore relies on regardless of the
   rewriter's optimization switch. `plan.proto` changes show in the gitlink
-  diff, as `*_c.h` changes do.
+  diff, as `*_c.h` changes do. The same holds for `milvus.filter`: its
+  expression is parsed by the connector's own front end, which today accepts a
+  bounded subset of Plan.g4 and rejects the rest, so wider Milvus syntax means
+  a wider front end in the JVM, not the Go parser on the driver or anywhere
+  else.
+- **segcore decides which rows a segment excludes; the connector keeps the
+  vector search.** For each segment, segcore evaluates the predicates assigned
+  to it and returns the matching row offsets, which become the exclusion
+  bitmap the reads and searches already consume. Knowhere is still called by
+  the connector, and segment loading for search, the resource planner, the
+  merge and the take are unchanged. The planner's budgets are per task and its
+  constants were measured on the connector's own Knowhere path: index copies
+  held after a load, the 32 MiB exact-scan block, queries per core in one
+  call, the answer buffers in JVM direct memory that Knowhere writes into
+  without a copy. segcore's search keeps segment data in a process-wide cache
+  with its own watermarks and eviction and returns answers in C++ vectors that
+  are copied out, so moving the search there would replace those measurements
+  without a gain in the distance computation, which is the same Knowhere.
+- **Spark's semantics stay with the JVM evaluator.** A predicate Spark pushes
+  is correct when it matches Spark, not Milvus; NaN ordering is one place they
+  differ. The connector assigns each accepted predicate to an evaluator:
+  segcore for (predicate, type) pairs that differential tests against the JVM
+  evaluator and Spark have admitted, the JVM evaluator for the rest.
+  Predicates are top-level conjuncts, so their exclusions combine by union and
+  a predicate is never split between evaluators. `milvus.filter` is defined by
+  Milvus, so segcore is its reference once its front end can express a form.
+- **No iterative filtering.** Milvus can search first and test the predicate
+  only on candidates (`hints=iterative_filter`), which saves work when a
+  request carries a few queries. A Spark search carries thousands to millions,
+  and the exclusion bitmap is computed once per segment and shared by every
+  query group, while iterative filtering repeats the predicate for every query.
 - **One milvus-proto for the repository.** The C++ protobuf sources are
   generated from this repository's `milvus-proto` submodule, using the
   `--cpp_out` list of Milvus's `scripts/generate_proto.sh`. `build.py` fails
@@ -119,11 +152,16 @@ sealed segments, and they go once sealed loading is in place.
 - sbt module, packaging into the platform bundle and loading through
   `native-runtime`.
 - Sealed segments loaded from V3 manifests, remote storage initialization,
-  deletes, Arrow export of results, cancellation, and search.
-- Spark predicate to PlanNode translation.
+  deletes and cancellation.
+- `PredicateExpr` to PlanNode translation, the offsets-to-bitmap step in the
+  row exclusions, and the list of (predicate, type) pairs segcore evaluates,
+  each admitted by differential tests.
 - The milvus-storage JNI copy fix, then Knowhere and storage JNI from this
   build.
 - Knowhere and milvus-storage gitlinks moved to the Milvus pins and passed to
   the Milvus build through `FETCHCONTENT_SOURCE_DIR_*`, so no source is
   fetched twice.
 - Replacing `native/build` for Knowhere and storage with this build.
+- Size: debug information shipped separately, dependencies the connector does
+  not reach removed, and `libmilvus_core` loaded only by reads that use it.
+- The probe as a CI job.
