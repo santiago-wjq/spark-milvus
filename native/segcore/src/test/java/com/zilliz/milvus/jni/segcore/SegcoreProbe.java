@@ -1,23 +1,34 @@
 package com.zilliz.milvus.jni.segcore;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.function.Predicate;
 
 /**
- * End-to-end probe of the segcore JNI in one JVM: collection, growing segment
- * insert, and retrieves with plans built in the JVM.
+ * End-to-end probe of the segcore JNI in one JVM: a growing segment filled by
+ * inserts, sealed segments loaded from V3 manifests, and retrieves with plans
+ * built in the JVM.
  *
  * <p>It answers the build feasibility gate: the libraries of one Milvus build
  * load and run together in HotSpot. Plans are planpb.PlanNode messages built
  * here, as the connector will build them from Spark predicates, so no Go plan
- * parser is involved. Run it with the JRE's libjsig preloaded and
- * java.library.path naming the Milvus output lib directory; it exits non-zero
- * on the first mismatch. Protobuf messages are encoded by hand so the probe
- * needs no generated classes; field numbers follow schema.proto,
- * segcore.proto and plan.proto at the pinned Milvus.
+ * parser is involved. The sealed segments are the api collection fixture's
+ * (core/src/test/resources/read-fixtures/collections/api), loaded with only
+ * their scalar fields, and every expected answer is computed from the
+ * fixture's literal input rows, never from a read of the stored bytes. Run it
+ * through run_probe.sh, which preloads the JRE's libjsig, copies the fixture
+ * and lists its rows and manifest paths; it exits non-zero on the first
+ * mismatch. Protobuf messages are encoded by hand so the probe needs no
+ * generated classes; field numbers follow schema.proto, segcore.proto and
+ * plan.proto at the pinned Milvus.
  */
 public final class SegcoreProbe {
     private static final long PK = 100;
@@ -26,8 +37,20 @@ public final class SegcoreProbe {
     private static final int INT64 = 5;
     private static final int VARCHAR = 21;
 
+    // The api fixture: collection 10, partition 20, sealed segments 30 and 31.
+    // Its column groups hold the vector alone, and the system fields with id
+    // and category.
+    private static final long API_COLLECTION = 10;
+    private static final long API_PARTITION = 20;
+    private static final long ID = 100;
+    private static final long VECTOR = 101;
+    private static final long CATEGORY = 102;
+    private static final int FLOAT_VECTOR = 101;
+    private static final int STORAGE_V3 = 3;
+
     // plan.proto OpType
     private static final int GREATER_THAN = 1;
+    private static final int GREATER_EQUAL = 2;
     private static final int LESS_THAN = 3;
     private static final int EQUAL = 5;
     private static final int PREFIX_MATCH = 7;
@@ -42,11 +65,28 @@ public final class SegcoreProbe {
 
     private SegcoreProbe() {}
 
-    public static void main(String[] args) {
-        System.loadLibrary("milvus-segcore-jni");
-        String localDir = args.length > 0 ? args[0] : System.getProperty("java.io.tmpdir") + "/segcore-probe";
-        SegcoreNative.init(Runtime.getRuntime().availableProcessors(), localDir, 1L << 30);
+    /** A row of the fixture's literal input: id and a category that is never null here. */
+    private record Row(long id, long category) {}
 
+    /**
+     * @param args the local directory segcore owns, and the copied fixture's
+     *     rows and manifest paths as tab-separated lines
+     */
+    public static void main(String[] args) throws IOException {
+        if (args.length != 2) {
+            throw new IllegalArgumentException("usage: SegcoreProbe <local dir> <fixture lines>");
+        }
+        System.loadLibrary("milvus-segcore-jni");
+        SegcoreNative.init(Runtime.getRuntime().availableProcessors(), args[0], 1L << 30);
+        growing();
+        // The fixture takes a few KiB; 1 GiB of memory and disk is ample.
+        SegcoreNative.configureCache(1L << 30, 1L << 30, 1L << 30, 1L << 30, 1L << 30, 1L << 30,
+            Path.of(args[0], "cache").toString());
+        sealed(Path.of(args[1]));
+        System.out.println("segcore probe passed");
+    }
+
+    private static void growing() {
         long collection = SegcoreNative.newCollection(schema());
         long segment = SegcoreNative.newGrowingSegment(collection, 1);
         try {
@@ -66,7 +106,7 @@ public final class SegcoreProbe {
                 or(range(AGE, INT64, LESS_THAN, int64(15)), range(NAME, VARCHAR, EQUAL, string("frank"))), 1, 6);
             expect(collection, segment, "age < 0", range(AGE, INT64, LESS_THAN, int64(0)));
             try {
-                SegcoreNative.createRetrievePlan(collection, plan(range(999, INT64, EQUAL, int64(1))));
+                SegcoreNative.createRetrievePlan(collection, plan(range(999, INT64, EQUAL, int64(1)), PK, AGE));
                 throw new AssertionError("a plan over an unknown field was accepted");
             } catch (SegcoreException expected) {
                 System.out.println("rejected (code " + expected.code() + "): " + expected.getMessage());
@@ -75,28 +115,142 @@ public final class SegcoreProbe {
             SegcoreNative.deleteSegment(segment);
             SegcoreNative.deleteCollection(collection);
         }
-        System.out.println("segcore probe passed");
+    }
+
+    /**
+     * Sealed segments of the api fixture, loaded through its V3 manifests with
+     * the collection's load fields set to id and category; the vector is never
+     * read, since segcore loads fields outside that list only when a request
+     * touches them. A cancelled load stops with an error and leaves the
+     * segment loadable.
+     */
+    private static void sealed(Path lines) throws IOException {
+        SegcoreNative.initLocalFileSystem();
+        Map<Long, String> manifests = new HashMap<>();
+        Map<Long, List<Row>> rows = new HashMap<>();
+        readFixtureLines(lines, manifests, rows);
+
+        long collection = SegcoreNative.newCollection(apiSchema());
+        try {
+            SegcoreNative.setLoadFields(collection, new long[] {ID, CATEGORY});
+
+            List<Row> first = rows.get(30L);
+            long segment = sealedSegment(collection, 30, first.size(), manifests);
+            try {
+                SegcoreNative.load(segment, 0);
+                check("sealed row count", SegcoreNative.rowCount(segment), first.size());
+                expectRows(collection, segment, "id >= 0", range(ID, INT64, GREATER_EQUAL, int64(0)), first,
+                    r -> r.id() >= 0);
+                expectRows(collection, segment, "category == 1", range(CATEGORY, INT64, EQUAL, int64(1)), first,
+                    r -> r.category() == 1);
+                expectRows(collection, segment, "id >= 3004 and category == 0",
+                    and(range(ID, INT64, GREATER_EQUAL, int64(3004)), range(CATEGORY, INT64, EQUAL, int64(0))),
+                    first, r -> r.id() >= 3004 && r.category() == 0);
+                expectRows(collection, segment, "id in [3007, 3002, 3007, 9999]",
+                    term(ID, INT64, 3007, 3002, 3007, 9999), first,
+                    r -> r.id() == 3007 || r.id() == 3002 || r.id() == 9999);
+                expectRows(collection, segment, "not category == 1 or id < 3002",
+                    or(not(range(CATEGORY, INT64, EQUAL, int64(1))), range(ID, INT64, LESS_THAN, int64(3002))),
+                    first, r -> r.category() != 1 || r.id() < 3002);
+                expectRows(collection, segment, "id > 9000", range(ID, INT64, GREATER_THAN, int64(9000)), first,
+                    r -> r.id() > 9000);
+            } finally {
+                SegcoreNative.deleteSegment(segment);
+            }
+
+            List<Row> second = rows.get(31L);
+            long other = sealedSegment(collection, 31, second.size(), manifests);
+            try {
+                long cancellation = SegcoreNative.newLoadCancellation();
+                try {
+                    SegcoreNative.cancelLoad(cancellation);
+                    try {
+                        SegcoreNative.load(other, cancellation);
+                        throw new AssertionError("a cancelled load completed");
+                    } catch (SegcoreException expected) {
+                        System.out.println("cancelled (code " + expected.code() + "): " + expected.getMessage());
+                    }
+                } finally {
+                    SegcoreNative.releaseLoadCancellation(cancellation);
+                }
+                SegcoreNative.load(other, 0);
+                expectRows(collection, other, "segment 31 after a cancelled load: category == 0",
+                    range(CATEGORY, INT64, EQUAL, int64(0)), second, r -> r.category() == 0);
+            } finally {
+                SegcoreNative.deleteSegment(other);
+            }
+        } finally {
+            SegcoreNative.deleteCollection(collection);
+        }
+    }
+
+    /**
+     * Lines from run_probe.sh: {@code manifest <segment> <manifest path>},
+     * {@code row <segment> <id> <category>} and {@code delete <segment> <id>}.
+     * Manifest base paths arrive absolute, as Milvus writes them for local
+     * storage. The checks apply no deletes and cover no null categories, so a
+     * fixture with either fails here rather than in a comparison.
+     */
+    private static void readFixtureLines(Path lines, Map<Long, String> manifests, Map<Long, List<Row>> rows)
+        throws IOException {
+        for (String line : Files.readAllLines(lines, StandardCharsets.UTF_8)) {
+            String[] cols = line.split("\t", -1);
+            long segment = Long.parseLong(cols[1]);
+            switch (cols[0]) {
+                case "manifest" -> manifests.put(segment, cols[2]);
+                case "row" -> {
+                    if (cols[3].equals("null")) {
+                        throw new AssertionError("segment " + segment + " row " + cols[2] + " has a null category");
+                    }
+                    rows.computeIfAbsent(segment, s -> new ArrayList<>())
+                        .add(new Row(Long.parseLong(cols[2]), Long.parseLong(cols[3])));
+                }
+                case "delete" -> throw new AssertionError("segment " + segment + " has deletes");
+                default -> throw new IllegalArgumentException("unknown fixture line: " + line);
+            }
+        }
+    }
+
+    private static long sealedSegment(long collection, long segment, long rowCount, Map<Long, String> manifests) {
+        String manifest = manifests.get(segment);
+        if (manifest == null) {
+            throw new AssertionError("no manifest path for segment " + segment);
+        }
+        return SegcoreNative.newSealedSegment(collection, segment, false, loadInfo(segment, rowCount, manifest));
     }
 
     private static void expect(long collection, long segment, String label, Proto predicate, long... want) {
-        long plan = SegcoreNative.createRetrievePlan(collection, plan(predicate));
+        compare(label, retrieveSorted(collection, segment, plan(predicate, PK, AGE)), want);
+    }
+
+    private static void expectRows(long collection, long segment, String label, Proto predicate, List<Row> rows,
+        Predicate<Row> matches) {
+        long[] want = rows.stream().filter(matches).mapToLong(Row::id).sorted().toArray();
+        compare(label, retrieveSorted(collection, segment, plan(predicate, ID, CATEGORY)), want);
+    }
+
+    private static long[] retrieveSorted(long collection, long segment, byte[] planNode) {
+        long plan = SegcoreNative.createRetrievePlan(collection, planNode);
         try {
-            byte[] results = SegcoreNative.retrieve(segment, plan, 1000, 1L << 30);
-            long[] got = retrievedPks(results);
+            long[] got = retrievedPks(SegcoreNative.retrieve(segment, plan, 1000, 1L << 30));
             Arrays.sort(got);
-            if (!Arrays.equals(got, want)) {
-                throw new AssertionError(label + ": want " + Arrays.toString(want) + ", got " + Arrays.toString(got));
-            }
-            System.out.println("ok: " + label + " -> " + Arrays.toString(got));
+            return got;
         } finally {
             SegcoreNative.deleteRetrievePlan(plan);
         }
     }
 
+    private static void compare(String label, long[] got, long[] want) {
+        if (!Arrays.equals(got, want)) {
+            throw new AssertionError(label + ": want " + Arrays.toString(want) + ", got " + Arrays.toString(got));
+        }
+        System.out.println("ok: " + label + " -> " + Arrays.toString(got));
+    }
+
     // planpb.PlanNode{query=4 -> QueryPlanNode{predicates=1}, output_field_ids=3}
-    private static byte[] plan(Proto predicate) {
+    private static byte[] plan(Proto predicate, long... outputs) {
         Proto query = new Proto().message(1, predicate);
-        return new Proto().message(4, query).packedInt64(3, PK, AGE).bytes();
+        return new Proto().message(4, query).packedInt64(3, outputs).bytes();
     }
 
     // planpb.ColumnInfo{field_id=1, data_type=2, is_primary_key=3}
@@ -161,6 +315,30 @@ public final class SegcoreProbe {
         Proto maxLength = new Proto().string(1, "max_length").string(2, "64");
         Proto name = new Proto().int64(1, NAME).string(2, "name").int64(5, VARCHAR).message(6, maxLength);
         return new Proto().string(1, "probe").message(4, pk).message(4, age).message(4, name).bytes();
+    }
+
+    // The api fixture's schema as its snapshot.json records it, with the system
+    // fields RootCoord appends to every collection (createCollectionTask.
+    // appendSysFields): a sealed segment's column groups carry RowID and
+    // Timestamp, and segcore resolves them through the schema, while snapshot
+    // schemas list only the user's fields.
+    // FieldSchema{description=4, type_params=6, nullable=15}; KeyValuePair{key=1, value=2}
+    private static byte[] apiSchema() {
+        Proto id = new Proto().int64(1, ID).string(2, "id").bool(3, true).int64(5, INT64);
+        Proto dim = new Proto().string(1, "dim").string(2, "2");
+        Proto vector = new Proto().int64(1, VECTOR).string(2, "vector").int64(5, FLOAT_VECTOR).message(6, dim);
+        Proto category = new Proto().int64(1, CATEGORY).string(2, "category").int64(5, INT64).bool(15, true);
+        Proto rowId = new Proto().int64(1, 0).string(2, "RowID").string(4, "row id").int64(5, INT64);
+        Proto timestamp = new Proto().int64(1, 1).string(2, "Timestamp").string(4, "time stamp").int64(5, INT64);
+        return new Proto().string(1, "local-collection").message(4, id).message(4, vector).message(4, category)
+            .message(4, rowId).message(4, timestamp).bytes();
+    }
+
+    // segcore.SegmentLoadInfo{segmentID=1, partitionID=2, collectionID=3,
+    // num_of_rows=7, storageVersion=15, manifest_path=21}
+    private static byte[] loadInfo(long segment, long rowCount, String manifest) {
+        return new Proto().int64(1, segment).int64(2, API_PARTITION).int64(3, API_COLLECTION).int64(7, rowCount)
+            .int64(15, STORAGE_V3).string(21, manifest).bytes();
     }
 
     // segcore.InsertRecord{fields_data=1, num_rows=2}

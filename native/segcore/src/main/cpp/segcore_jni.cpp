@@ -32,6 +32,7 @@
 
 #include "common/init_c.h"
 #include "futures/future_c.h"
+#include "segcore/arrow_fs_c.h"
 #include "segcore/collection_c.h"
 #include "segcore/plan_c.h"
 #include "segcore/segcore_init_c.h"
@@ -107,6 +108,14 @@ Bytes(JNIEnv* env, jbyteArray array) {
     if (n > 0) {
         env->GetByteArrayRegion(array, 0, n, reinterpret_cast<jbyte*>(out.data()));
     }
+    return out;
+}
+
+std::string
+Utf(JNIEnv* env, jstring string) {
+    const char* chars = env->GetStringUTFChars(string, nullptr);
+    std::string out(chars);
+    env->ReleaseStringUTFChars(string, chars);
     return out;
 }
 
@@ -264,9 +273,7 @@ Java_com_zilliz_milvus_jni_segcore_SegcoreNative_init(JNIEnv* env, jclass, jint 
                                                        jlong mmapDiskLimitBytes) {
     SegcoreInit(nullptr);
     InitCpuNum(cpuNum);
-    const char* chars = env->GetStringUTFChars(localDir, nullptr);
-    std::string root(chars);
-    env->ReleaseStringUTFChars(localDir, chars);
+    std::string root = Utf(env, localDir);
     if (!CheckStatus(env, InitLocalChunkManagerSingleton(root.c_str()), "InitLocalChunkManagerSingleton")) {
         return;
     }
@@ -278,6 +285,50 @@ Java_com_zilliz_milvus_jni_segcore_SegcoreNative_init(JNIEnv* env, jclass, jint 
     config.fix_file_size = 64ULL << 20;
     config.json_stats_mmap_path = mmap.c_str();
     CheckStatus(env, InitMmapManager(config), "InitMmapManager");
+}
+
+// The cache layer sealed segments load through, which accounts their memory
+// and disk against these watermarks. QueryNode's defaults apply with two
+// exceptions. Vector indexes are not warmed up, as vector fields already are
+// not: the connector searches with its own Knowhere calls, and segcore only
+// evaluates predicates. And one prefetch thread serves, since nothing warms up
+// asynchronously; scalar fields and indexes warm up during the load.
+JNIEXPORT void JNICALL
+Java_com_zilliz_milvus_jni_segcore_SegcoreNative_configureCache(JNIEnv* env, jclass, jlong memoryLowBytes,
+                                                                 jlong memoryHighBytes, jlong memoryMaxBytes,
+                                                                 jlong diskLowBytes, jlong diskHighBytes,
+                                                                 jlong diskMaxBytes, jstring diskPath) {
+    std::string path = Utf(env, diskPath);
+    ConfigureTieredStorage(CacheWarmupPolicy_Sync, CacheWarmupPolicy_Disable, CacheWarmupPolicy_Sync,
+                           CacheWarmupPolicy_Disable, memoryLowBytes, memoryHighBytes, memoryMaxBytes, diskLowBytes,
+                           diskHighBytes, diskMaxBytes,
+                           /*storage_usage_tracking_enabled=*/false,
+                           /*eviction_enabled=*/false,
+                           /*cache_touch_window_ms=*/3000,
+                           /*background_eviction_enabled=*/false,
+                           /*eviction_interval_ms=*/1000,
+                           /*cache_cell_unaccessed_survival_time=*/0,
+                           /*overloaded_memory_threshold_percentage=*/0.9f,
+                           /*loading_resource_factor=*/1.0f,
+                           /*max_disk_usage_percentage=*/0.95f, path.c_str(),
+                           /*loading_timeout_ms=*/-1,
+                           /*warmup_loading_timeout_ms=*/0,
+                           /*reject_remote_vector_output=*/false,
+                           /*prefetch_pool_threads=*/1);
+}
+
+// The file system segcore reads V3 manifests and column groups through, here
+// local storage. Milvus keys carry their whole prefix, which for local storage
+// makes them absolute paths, so segcore roots the local file system at "/"
+// whatever root_path says, and manifest base paths must be absolute. The
+// fields left unset are the remote store's; QueryNode leaves them unset for
+// local storage too.
+JNIEXPORT void JNICALL
+Java_com_zilliz_milvus_jni_segcore_SegcoreNative_initLocalFileSystem(JNIEnv* env, jclass) {
+    CStorageConfig config{};
+    config.storage_type = "local";
+    config.talon_coordinator = "";
+    CheckStatus(env, InitArrowFileSystem(config), "InitArrowFileSystem");
 }
 
 JNIEXPORT jlong JNICALL
@@ -294,6 +345,15 @@ Java_com_zilliz_milvus_jni_segcore_SegcoreNative_newCollection(JNIEnv* env, jcla
 JNIEXPORT void JNICALL
 Java_com_zilliz_milvus_jni_segcore_SegcoreNative_deleteCollection(JNIEnv*, jclass, jlong collection) {
     DeleteCollection(reinterpret_cast<CCollection>(collection));
+}
+
+JNIEXPORT void JNICALL
+Java_com_zilliz_milvus_jni_segcore_SegcoreNative_setLoadFields(JNIEnv* env, jclass, jlong collection,
+                                                                jlongArray fieldIds) {
+    jsize n = env->GetArrayLength(fieldIds);
+    std::vector<int64_t> ids(static_cast<size_t>(n));
+    env->GetLongArrayRegion(fieldIds, 0, n, reinterpret_cast<jlong*>(ids.data()));
+    CheckStatus(env, UpdateLoadFields(reinterpret_cast<CCollection>(collection), ids.data(), n), "UpdateLoadFields");
 }
 
 JNIEXPORT jlong JNICALL
@@ -325,6 +385,46 @@ Java_com_zilliz_milvus_jni_segcore_SegcoreNative_newGrowingSegment(JNIEnv* env, 
         return 0;
     }
     return reinterpret_cast<jlong>(segment);
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_zilliz_milvus_jni_segcore_SegcoreNative_newSealedSegment(JNIEnv* env, jclass, jlong collection,
+                                                                   jlong segmentId, jboolean sortedByPk,
+                                                                   jbyteArray loadInfo) {
+    auto blob = Bytes(env, loadInfo);
+    CSegmentInterface segment = nullptr;
+    if (!CheckStatus(env,
+                     NewSegmentWithLoadInfo(reinterpret_cast<CCollection>(collection), Sealed, segmentId, &segment,
+                                            sortedByPk == JNI_TRUE, blob.data(), static_cast<int64_t>(blob.size())),
+                     "NewSegmentWithLoadInfo")) {
+        return 0;
+    }
+    return reinterpret_cast<jlong>(segment);
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_zilliz_milvus_jni_segcore_SegcoreNative_newLoadCancellation(JNIEnv*, jclass) {
+    return reinterpret_cast<jlong>(NewLoadCancellationSource());
+}
+
+JNIEXPORT void JNICALL
+Java_com_zilliz_milvus_jni_segcore_SegcoreNative_cancelLoad(JNIEnv*, jclass, jlong cancellation) {
+    CancelLoadCancellationSource(reinterpret_cast<CLoadCancellationSource>(cancellation));
+}
+
+JNIEXPORT void JNICALL
+Java_com_zilliz_milvus_jni_segcore_SegcoreNative_releaseLoadCancellation(JNIEnv*, jclass, jlong cancellation) {
+    ReleaseLoadCancellationSource(reinterpret_cast<CLoadCancellationSource>(cancellation));
+}
+
+// SegmentLoad on the calling thread; cancellation 0 loads without a source.
+JNIEXPORT void JNICALL
+Java_com_zilliz_milvus_jni_segcore_SegcoreNative_load(JNIEnv* env, jclass, jlong segment, jlong cancellation) {
+    CTraceContext trace{nullptr, nullptr, 0};
+    CheckStatus(env,
+                SegmentLoad(trace, reinterpret_cast<CSegmentInterface>(segment),
+                            reinterpret_cast<CLoadCancellationSource>(cancellation)),
+                "SegmentLoad");
 }
 
 JNIEXPORT void JNICALL

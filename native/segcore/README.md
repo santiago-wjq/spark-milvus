@@ -33,9 +33,12 @@ query wherever Milvus's semantics are the ones that apply.
   JNI target then fails after linking: its post-build step copies to
   `${CMAKE_SOURCE_DIR}/../java/`, which names a directory outside its tree
   when Milvus is the top-level project; `CMAKE_CURRENT_SOURCE_DIR` is the
-  intended base. Until that is fixed in milvus-storage, `build.py` passes
-  `-DWITH_JNI=OFF` and the connector keeps the Knowhere and storage JNI from
-  `native/build`.
+  intended base. With that one change, supplied through
+  `FETCHCONTENT_SOURCE_DIR_MILVUS-STORAGE` on top of the storage commit Milvus
+  pins, the Milvus build with `-DWITH_JNI=ON` completes and yields both
+  `libknowhere_jni` and `libmilvus-storage-jni`. Until the change is in the
+  storage source this build uses, `build.py` passes `-DWITH_JNI=OFF` and the
+  connector keeps the Knowhere and storage JNI from `native/build`.
 - **The JNI is maintained here, over the C interface only.** Milvus does not
   ship a JNI. `src/main/cpp/segcore_jni.cpp` maps one Java method to one C
   call and never includes segcore's C++ headers. When the `milvus` gitlink
@@ -66,7 +69,38 @@ query wherever Milvus's semantics are the ones that apply.
   `SegcoreInit`, `InitCpuNum`, the local chunk manager rooted at a directory
   the caller owns and the mmap manager under it. Segments need the mmap
   manager even with every mmap kind off, which follows Milvus's queryNode
-  defaults.
+  defaults. Sealed segments need two more process-wide settings first: the
+  cache layer they load through (`configureCache`, `ConfigureTieredStorage`),
+  without which a load fails to create its overhead group, and the file
+  system their manifests are read through (`initLocalFileSystem`,
+  `InitArrowFileSystem`).
+- **Sealed segments load the way QueryNode loads them.**
+  `NewSegmentWithLoadInfo` takes a `segcorepb.SegmentLoadInfo` with the
+  segment's V3 manifest path, storage version 3 and row count, and
+  `SegmentLoad` reads the column groups the manifest lists. Three properties
+  of that path shape the connector's use of it:
+  - The collection schema must include the system fields `RowID` (0) and
+    `Timestamp` (1), as RootCoord appends them to every collection: a column
+    group carries them, and segcore resolves every column through the schema.
+    Snapshot schemas list only the user's fields, so the connector adds them.
+  - Only the fields the predicates read are named through
+    `UpdateLoadFields`. segcore then loads the others lazily, on the first
+    request that touches them, and a filter never touches the vector. Vector
+    fields and indexes are also never warmed up, so a segment's vector column
+    group is listed but not read.
+  - Keys carry their whole storage prefix. For a remote store the file
+    system is rooted at the bucket and keys start with its root path; for
+    local storage segcore roots it at `/`, so local keys are absolute paths
+    and `root_path` is not consulted.
+
+  A load takes a cancellation source. A cancelled load stops with segcore's
+  cancellation error (code 2038 at the pinned Milvus), and the segment can be
+  loaded again.
+- **segcore's memory is the cache layer's.** Field data and indexes a sealed
+  segment loads are held by the process-wide cache layer and accounted against
+  its watermarks, not against the planner's per-task budgets. Eviction stays
+  off, as in QueryNode's defaults. How the planner's native room and these
+  watermarks divide an executor's memory is not decided yet.
 - **Plans are built in the JVM; the Go plan parser is not used.** segcore
   takes a serialized `planpb.PlanNode`, not an expression string. The
   connector's input is Spark's predicate tree, so it builds the PlanNode
@@ -140,19 +174,31 @@ rebuilds just `libmilvus-segcore-jni` against an existing output.
 native/segcore/build/run_probe.sh
 ```
 
-`SegcoreProbe` loads the JNI, inserts rows into a growing segment and checks
-retrieves for comparison, prefix, `IN`, `AND`, `OR` and `NOT` plans built in
-the JVM, under `-Xcheck:jni`. It exercises the build feasibility gate: the
-libraries of one Milvus build load and run together in HotSpot. The growing
-segment and insert entries exist only for this probe; the connector reads
-sealed segments, and they go once sealed loading is in place.
+`SegcoreProbe` loads the JNI and checks retrieves with plans built in the JVM,
+under `-Xcheck:jni`, in two parts. The first inserts rows into a growing
+segment and covers comparison, prefix, `IN`, `AND`, `OR` and `NOT` over
+integer and string fields. The second loads the sealed segments of the `api`
+collection fixture (`core/src/test/resources/read-fixtures/collections/api`)
+from their V3 manifests with only `id` and `category`, checks comparison,
+`IN`, `AND`, `OR` and `NOT` there, and cancels one load before it completes.
+Every expected answer is computed from the fixture's literal input rows in
+`expected.json`, never from a read of the stored bytes. `run_probe.sh` copies
+the fixture, makes its manifest base paths absolute for local storage and
+lists the rows for the probe. The probe exercises the build feasibility gate:
+the libraries of one Milvus build load and run together in HotSpot. The
+growing segment and insert entries exist only for this probe and go once a
+sealed fixture covers string fields.
 
 ## Not yet done
 
 - sbt module, packaging into the platform bundle and loading through
   `native-runtime`.
-- Sealed segments loaded from V3 manifests, remote storage initialization,
-  deletes and cancellation.
+- Remote storage initialization, deletes, and scalar indexes, which no
+  fixture carries yet.
+- The division of an executor's memory between the planner's native room and
+  the cache layer's watermarks, and whether Storage V3 column groups the
+  predicates do not read are created lazily
+  (`SegcoreSetLazyColumnGroupEnabled`).
 - `PredicateExpr` to PlanNode translation, the offsets-to-bitmap step in the
   row exclusions, and the list of (predicate, type) pairs segcore evaluates,
   each admitted by differential tests.
