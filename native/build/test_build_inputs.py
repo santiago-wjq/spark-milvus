@@ -12,7 +12,7 @@ import jvm_load
 import platforms
 from build import (digest, macos_openmp_redirect, platform_tool_requirements,
                    prepare_conan_lock, promote_bundle, replace_requires_section, snapshot_corrosion, validate_conan_lock,
-                   validate_locked_graph)
+                   validate_locked_graph, write_recipe_seed)
 
 
 #: The JNI entries this platform names, so fixtures match what promotion checks.
@@ -141,6 +141,37 @@ class ConanLockTest(unittest.TestCase):
     def test_lock_must_match_pinned_direct_recipe_revisions(self):
         with self.assertRaisesRegex(ValueError, "selected direct recipes"):
             validate_conan_lock(self.source, {"grpc": "grpc/1.0#new-patch"})
+
+    def test_seed_pins_transitive_recipes_without_direct_dependencies_or_overrides(self):
+        seed = self.root / "recipe-seed.lock"
+        references = {"c-ares": "c-ares/1.0#transitive"}
+        write_recipe_seed(seed, references)
+        record = json.loads(seed.read_text())
+        self.assertEqual(["c-ares/1.0#transitive"], record["requires"])
+        self.assertNotIn("overrides", record)
+        self.assertEqual([], record["build_requires"])
+
+    def test_supplied_lock_cannot_change_reviewed_transitive_recipe_at_same_version(self):
+        transitive = {"c-ares": "c-ares/1.0#transitive"}
+        prepare_conan_lock(self.source, self.destination, self.identity, self.references,
+                           transitive_references=transitive)
+        self.record["requires"][1] = "c-ares/1.0#new-requirements"
+        self.source.write_text(json.dumps(self.record))
+        with self.assertRaisesRegex(ValueError, "reviewed transitive recipes"):
+            prepare_conan_lock(self.source, self.root / "new.lock", self.root / "new.sha256", self.references,
+                               transitive_references=transitive)
+
+    def test_seed_entry_cannot_hide_a_different_resolved_transitive_recipe(self):
+        self.record["requires"].append("c-ares/2.0#unreviewed")
+        self.source.write_text(json.dumps(self.record))
+        with self.assertRaisesRegex(ValueError, "unreviewed transitive recipes"):
+            validate_conan_lock(self.source, self.references,
+                                transitive_references={"c-ares": "c-ares/1.0#transitive"})
+
+    def test_complete_lock_must_include_the_reviewed_transitive_dependency(self):
+        with self.assertRaisesRegex(ValueError, "reviewed transitive recipes"):
+            validate_conan_lock(self.source, self.references,
+                                transitive_references={"required": "required/1.0#reviewed"})
 
     def test_lock_must_pin_transitive_recipe_revisions(self):
         self.record["requires"][1] = "c-ares/1.0"
