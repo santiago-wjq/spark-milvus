@@ -66,7 +66,23 @@ public final class SegcoreProbe {
     private SegcoreProbe() {}
 
     /** A row of the fixture's literal input: id and a category that is never null here. */
-    private record Row(long id, long category) {}
+    private static final class Row {
+        private final long id;
+        private final long category;
+
+        Row(long id, long category) {
+            this.id = id;
+            this.category = category;
+        }
+
+        long id() {
+            return id;
+        }
+
+        long category() {
+            return category;
+        }
+    }
 
     /**
      * @param args the local directory segcore owns, and the copied fixture's
@@ -196,17 +212,18 @@ public final class SegcoreProbe {
         for (String line : Files.readAllLines(lines, StandardCharsets.UTF_8)) {
             String[] cols = line.split("\t", -1);
             long segment = Long.parseLong(cols[1]);
-            switch (cols[0]) {
-                case "manifest" -> manifests.put(segment, cols[2]);
-                case "row" -> {
-                    if (cols[3].equals("null")) {
-                        throw new AssertionError("segment " + segment + " row " + cols[2] + " has a null category");
-                    }
-                    rows.computeIfAbsent(segment, s -> new ArrayList<>())
-                        .add(new Row(Long.parseLong(cols[2]), Long.parseLong(cols[3])));
+            if (cols[0].equals("manifest")) {
+                manifests.put(segment, cols[2]);
+            } else if (cols[0].equals("row")) {
+                if (cols[3].equals("null")) {
+                    throw new AssertionError("segment " + segment + " row " + cols[2] + " has a null category");
                 }
-                case "delete" -> throw new AssertionError("segment " + segment + " has deletes");
-                default -> throw new IllegalArgumentException("unknown fixture line: " + line);
+                rows.computeIfAbsent(segment, s -> new ArrayList<>())
+                    .add(new Row(Long.parseLong(cols[2]), Long.parseLong(cols[3])));
+            } else if (cols[0].equals("delete")) {
+                throw new AssertionError("segment " + segment + " has deletes");
+            } else {
+                throw new IllegalArgumentException("unknown fixture line: " + line);
             }
         }
     }

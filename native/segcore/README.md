@@ -1,8 +1,9 @@
 # native/segcore: Milvus segcore through JNI
 
 Status: under development. Nothing in the published modules loads this code
-yet; it is not part of the unified platform bundle that `native-runtime`
-extracts, and the sbt build does not compile it.
+yet, and it is not part of the unified platform bundle that `native-runtime`
+extracts. sbt compiles the Java bindings as `native-segcore`, an unpublished
+module that only `core`'s tests depend on.
 
 ## What this is for
 
@@ -150,6 +151,18 @@ query wherever Milvus's semantics are the ones that apply.
   Predicates are top-level conjuncts, so their exclusions combine by union and
   a predicate is never split between evaluators. `milvus.filter` is defined by
   Milvus, so segcore is its reference once its front end can express a form.
+  `SegcoreDifferentialTest` in `core` is that differential test: it loads the
+  `api` and `nearest` fixtures' sealed segments into segcore, evaluates their
+  literal input rows with `PredicateEvaluator`, and requires the same rows for
+  every predicate it states. So far those are comparisons, `IN` lists and null
+  tests over integer fields, their negations, and AND and OR over pairs that
+  involve a null category; all agree, since segcore applies three-valued logic
+  as Spark does.
+- **Deletes stay with the connector.** A segment loaded from its manifest path
+  alone does not apply the delete files the manifest lists, even when read
+  past the deletes' timestamp. segcore answers which rows a predicate admits,
+  and the connector's own delete exclusions, which already apply those files,
+  stay in force.
 - **No iterative filtering.** Milvus can search first and test the predicate
   only on candidates (`hints=iterative_filter`), which saves work when a
   request carries a few queries. A Spark search carries thousands to millions,
@@ -210,17 +223,16 @@ sealed fixture covers string fields.
 
 ## Not yet done
 
-- sbt module, packaging into the platform bundle and loading through
-  `native-runtime`.
-- Remote storage initialization, deletes, and scalar indexes, which no
-  fixture carries yet.
+- Packaging into the platform bundle and loading through `native-runtime`.
+- Remote storage initialization, and scalar indexes, which no fixture carries
+  yet.
 - The division of an executor's memory between the planner's native room and
   the cache layer's watermarks, and whether Storage V3 column groups the
   predicates do not read are created lazily
   (`SegcoreSetLazyColumnGroupEnabled`).
 - The list of (predicate, type) pairs segcore evaluates, each admitted by
-  differential tests against `PredicateEvaluator`, and the offsets-to-bitmap
-  step in the row exclusions.
+  `SegcoreDifferentialTest`, which does not yet cover string and boolean
+  fields, and the offsets-to-bitmap step in the row exclusions.
 - The `milvus` gitlink moved to a Milvus commit whose storage pin has the
   JNI copy fix, then Knowhere and storage JNI from this build.
 - Knowhere and milvus-storage gitlinks moved to the Milvus pins and passed to

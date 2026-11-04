@@ -123,6 +123,12 @@ bundle. Ordinary tests and CI only verify and copy committed inputs.
 
 Tests that require upstream Storage or Knowhere JNI cancel when the selected
 bundle is unavailable. This does not count as successful native validation.
+`SegcoreDifferentialTest` in `core` compares segcore with `PredicateEvaluator`
+on the `api` and `nearest` collection fixtures; it needs the segcore build's
+libraries under `milvus/internal/core/output/lib`
+(`native/segcore/build/build.py`) and cancels without them. It runs in a JVM
+of its own, because `libmilvus_core` links its own milvus-storage, which must
+not share a process with the storage JNI.
 Core segment/Arrow read suites and Spark `nearestby`, `V3ReadContractTest` and
 `ConnectReadSessionTest` use frozen V3 inputs. Connect runs on the 4.x lines,
 with the client isolated from the classic Spark classpath. Local filesystem and

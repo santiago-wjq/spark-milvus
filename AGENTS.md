@@ -54,7 +54,8 @@ Three git submodules: `milvus-proto`, `milvus-storage` and `knowhere` supply
 the protobuf definitions and the two native engines and must be initialized to
 build. A fourth, `milvus`, is used only by the segcore integration under
 development in `native/segcore` (see its README); the modules above do not
-read it.
+read it. sbt compiles that directory's Java bindings as `native-segcore`, an
+unpublished layer-1 module that only `core`'s tests depend on.
 
 ## Rules any change has to satisfy
 

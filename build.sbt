@@ -23,7 +23,7 @@ lazy val compileAndRuntime = "compile->compile;runtime->runtime"
 // The root is an aggregate only. Select one Spark line per sbt invocation.
 lazy val root = project
   .in(file("."))
-  .aggregate(nativeRuntime, nativeStorage, nativeVector, core, spark)
+  .aggregate(nativeRuntime, nativeStorage, nativeVector, nativeSegcore, core, spark)
   .settings(
     name := "spark-milvus",
     ReadValidation.matrixSettings,
@@ -131,8 +131,29 @@ lazy val nativeVector = Project("native-vector", file("native/vector"))
     publish / skip := true
   )
 
+// Layer 1, under development: the segcore JNI over Milvus's C interface,
+// whose library native/segcore/build/build.py builds outside the unified
+// bundle. Nothing published depends on it; core's tests do, where that build's
+// output is present.
+lazy val nativeSegcore = Project("native-segcore", file("native/segcore"))
+  .settings(
+    name := "native-segcore",
+    moduleName := "spark-milvus-native-segcore",
+    Modules.javaOnly,
+    // SegcoreLog writes through slf4j, which Spark ships at runtime.
+    libraryDependencies += "org.slf4j" % "slf4j-api" % Versions.slf4j % "provided",
+    publish / skip := true
+  )
+
 lazy val milvusProtoDir =
   Def.setting((ThisBuild / baseDirectory).value / "milvus-proto" / "proto")
+
+// The segcore build's installed libraries, where native/segcore/build/build.py
+// puts them.
+lazy val segcoreLibraryDir =
+  Def.setting(
+    (ThisBuild / baseDirectory).value / "milvus" / "internal" / "core" / "output" / "lib"
+  )
 
 // Layer 2: the core layer. All computation happens here, and no source file
 // mentions org.apache.spark.
@@ -140,7 +161,8 @@ lazy val core = project
   .in(file("core"))
   .dependsOn(
     nativeStorage % compileAndRuntime,
-    nativeVector % compileAndRuntime
+    nativeVector % compileAndRuntime,
+    nativeSegcore % "test->compile"
   )
   .settings(
     name := "core",
@@ -193,6 +215,33 @@ lazy val core = project
     // structs across, which needs the library path and the java.nio add-opens
     // the Spark lines already get.
     inConfig(Test)(Modules.nativeTest),
+    // The segcore suite loads libmilvus_core, which links a milvus-storage of
+    // its own: it runs in a JVM of its own, so that copy never shares a
+    // process with the storage JNI the other native suites load, and finds the
+    // segcore build's libraries through milvus.segcore.lib.
+    Test / testGrouping := {
+      val groups = (Test / testGrouping).value
+      val options = (Test / forkOptions).value
+      val library = segcoreLibraryDir.value.getAbsolutePath
+      val segcore = options
+        .withEnvVars(options.envVars ++ Map("LD_LIBRARY_PATH" -> library))
+        .withRunJVMOptions(options.runJVMOptions :+ s"-Dmilvus.segcore.lib=$library")
+      val segcoreSuite = "com.zilliz.milvus.storage.expr.SegcoreDifferentialTest"
+      groups.flatMap { group =>
+        val (isolated, remaining) =
+          group.tests.partition(_.name == segcoreSuite)
+        if (isolated.isEmpty) Seq(group)
+        else
+          (if (remaining.isEmpty) Seq.empty
+           else Seq(group.withTests(remaining))) ++
+            isolated.map(test =>
+              group
+                .withName(s"${group.name}-${test.name}")
+                .withTests(Seq(test))
+                .withRunPolicy(Tests.SubProcess(segcore))
+            )
+      }
+    },
     // Storage schema messages, and the plan messages segcore takes, from the
     // copy of Milvus's plan.proto in src/main/protobuf; no service stubs
     // belong here.
