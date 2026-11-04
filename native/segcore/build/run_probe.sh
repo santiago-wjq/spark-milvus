@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
 # Compile and run SegcoreProbe against the Milvus output that build.py
 # installed, with sealed segments from the api collection fixture.
-#
-# Native glog lines go through slf4j to log4j, as in an executor. The probe
-# uses the slf4j and log4j versions Spark 4.0 ships, downloaded once into
-# PROBE_JARS (default ~/.cache/segcore-probe).
+# Native glog lines go to stderr, as in an executor.
 set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 lib="$root/milvus/internal/core/output/lib"
@@ -12,26 +9,11 @@ lib="$root/milvus/internal/core/output/lib"
 jsig=$(find "$JAVA_HOME/" -name libjsig.so -path '*/server/*' -o -name libjsig.so -path '*/lib/*' | head -n1)
 [[ -n "$jsig" ]] || { echo "no libjsig.so under $JAVA_HOME" >&2; exit 1; }
 
-jars="${PROBE_JARS:-$HOME/.cache/segcore-probe}"
-mkdir -p "$jars"
-central=https://repo1.maven.org/maven2
-cp=""
-for coord in org/slf4j:slf4j-api:2.0.16 \
-             org/apache/logging/log4j:log4j-api:2.24.3 \
-             org/apache/logging/log4j:log4j-core:2.24.3 \
-             org/apache/logging/log4j:log4j-slf4j2-impl:2.24.3; do
-  IFS=: read -r group artifact version <<<"$coord"
-  jar="$jars/$artifact-$version.jar"
-  [[ -s "$jar" ]] || curl -fsSL -o "$jar" "$central/$group/$artifact/$version/$artifact-$version.jar"
-  cp="$cp:$jar"
-done
-cp=${cp#:}
-
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 classes="$work/classes"
 src="$root/native/segcore/src"
-"$JAVA_HOME/bin/javac" -d "$classes" -cp "$cp" \
+"$JAVA_HOME/bin/javac" -d "$classes" \
   "$src"/main/java/com/zilliz/milvus/jni/segcore/*.java \
   "$src"/test/java/com/zilliz/milvus/jni/segcore/SegcoreProbe.java
 
@@ -63,8 +45,17 @@ for segment in expected["segments"]:
         print("row", segment["id"], row["id"], category, sep="\t")
 EOF
 
-LD_PRELOAD="$jsig" LD_LIBRARY_PATH="$lib" \
+# The probe leaves through System.exit, as an executor does. A JVM that has
+# not exited two minutes after it started fails the probe: the run itself
+# takes seconds, and an exit that hangs never ends.
+# libjsig is preloaded into the JVM alone.
+status=0
+timeout --kill-after=10s 120s \
+  env LD_PRELOAD="$jsig" LD_LIBRARY_PATH="$lib" \
   "$JAVA_HOME/bin/java" -Xcheck:jni -Djava.library.path="$lib" \
-  -Dlog4j2.configurationFile="$src/test/resources/log4j2-probe.properties" \
-  -cp "$classes:$cp" com.zilliz.milvus.jni.segcore.SegcoreProbe \
-  "$work/segcore" "$work/api.tsv"
+  -cp "$classes" com.zilliz.milvus.jni.segcore.SegcoreProbe \
+  "$work/segcore" "$work/api.tsv" || status=$?
+if [[ $status -eq 124 || $status -eq 137 ]]; then
+  echo "SegcoreProbe: the JVM did not exit" >&2
+fi
+exit "$status"

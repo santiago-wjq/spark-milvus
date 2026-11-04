@@ -5,10 +5,21 @@ package com.zilliz.milvus.jni.segcore;
  *
  * <p>Load libmilvus-segcore-jni before the first call; it links libmilvus_core
  * from the same Milvus build as the Knowhere and storage JNI. HotSpot must start
- * with its own JRE's libjsig preloaded, as Knowhere requires.
+ * with its own JRE's libjsig preloaded, as Knowhere requires. Once {@link #init}
+ * has run, the glog lines of segcore, Knowhere and milvus-storage go to stderr,
+ * at the level {@link #setLogLevel} sets.
  */
 public final class SegcoreNative {
     private SegcoreNative() {}
+
+    /**
+     * SetLogLevel, as QueryNode applies its {@code log.level}: the lowest
+     * severity of the native libraries' glog lines, one of {@code trace},
+     * {@code debug}, {@code info}, {@code warn} and {@code error}, where
+     * {@code debug} and {@code trace} add glog's verbose lines. Takes effect
+     * from the next line. Throws IllegalArgumentException for any other name.
+     */
+    public static native void setLogLevel(String level);
 
     /**
      * SegcoreInit with default configuration, InitCpuNum, then the local chunk

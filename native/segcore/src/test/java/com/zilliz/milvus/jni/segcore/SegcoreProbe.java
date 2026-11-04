@@ -26,7 +26,8 @@ import java.util.function.Predicate;
  * fixture's literal input rows, never from a read of the stored bytes. Run it
  * through run_probe.sh, which preloads the JRE's libjsig, copies the fixture
  * and lists its rows and manifest paths; it exits non-zero on the first
- * mismatch. Protobuf messages are encoded by hand so the probe needs no
+ * mismatch, and leaves through System.exit, the way a Spark executor's JVM
+ * exits. Protobuf messages are encoded by hand so the probe needs no
  * generated classes; field numbers follow schema.proto, segcore.proto and
  * plan.proto at the pinned Milvus.
  */
@@ -94,12 +95,24 @@ public final class SegcoreProbe {
         }
         System.loadLibrary("milvus-segcore-jni");
         SegcoreNative.init(Runtime.getRuntime().availableProcessors(), args[0], 1L << 30);
+        SegcoreNative.setLogLevel("info");
+        try {
+            SegcoreNative.setLogLevel("warning");
+            throw new AssertionError("setLogLevel accepted a name Milvus's log.level does not have");
+        } catch (IllegalArgumentException expected) {
+            System.out.println("rejected: " + expected.getMessage());
+        }
         growing();
         // The fixture takes a few KiB; 1 GiB of memory and disk is ample.
         SegcoreNative.configureCache(1L << 30, 1L << 30, 1L << 30, 1L << 30, 1L << 30, 1L << 30,
             Path.of(args[0], "cache").toString());
         sealed(Path.of(args[1]));
         System.out.println("segcore probe passed");
+        // Leave as an executor does. System.exit runs the native static
+        // destructors under the VM's final safepoint, where a thread that
+        // enters the JVM blocks for good; run_probe.sh fails a JVM that does
+        // not exit.
+        System.exit(0);
     }
 
     private static void growing() {

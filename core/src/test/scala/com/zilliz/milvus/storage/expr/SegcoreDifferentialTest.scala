@@ -80,6 +80,9 @@ class SegcoreDifferentialTest
         work.resolve("segcore").toString,
         1L << 30
       )
+      // Native lines go to the test JVM's stderr; their INFO lines would fill
+      // the test output.
+      SegcoreNative.setLogLevel("warn")
       // The fixtures take a few KiB.
       SegcoreNative.configureCache(
         1L << 30,

@@ -147,8 +147,6 @@ lazy val nativeSegcore = Project("native-segcore", file("native/segcore"))
     name := "native-segcore",
     moduleName := "spark-milvus-native-segcore",
     Modules.javaOnly,
-    // SegcoreLog writes through slf4j, which Spark ships at runtime.
-    libraryDependencies += "org.slf4j" % "slf4j-api" % Versions.slf4j % "provided",
     publish / skip := true
   )
 

@@ -50,26 +50,34 @@ query wherever Milvus's semantics are the ones that apply.
   call and never includes segcore's C++ headers. When the `milvus` gitlink
   moves, the diff of the installed `*_c.h` headers is the complete list of
   interface changes to review.
-- **The JNI library is segcore's logging host, and its lines go to log4j.**
+- **The JNI library is segcore's logging host, and its lines go to stderr.**
   segcore sends glog lines through a sink that calls `goZapLogExt`. On Linux
   `libmilvus_core` only declares it (the weak stub exists for macOS, an empty
   one under `WITHOUT_GO_LOGGING`); Milvus's Go binary exports the definition
   and writes to zap. The JNI library defines it instead, and the dynamic
   linker resolves `libmilvus_core`'s reference to it because both load in one
   `dlopen` scope. The sink is process-wide, so Knowhere's and
-  milvus-storage's glog lines take the same path. `goZapLogExt` calls
-  `SegcoreLog`, which writes through slf4j to the executor's log4j
-  configuration under `com.zilliz.milvus.jni.segcore.native.segcore`,
-  `.knowhere` and `.storage`; executor logs then carry native lines in the
-  same files, layout and level control as the connector's own. segcore logs
-  from its own pool threads: they are attached to the JVM as daemons on their
-  first line and detached when they exit, and the class and method are
-  resolved in `JNI_OnLoad`, because `FindClass` on an attached native thread
-  sees only the system class loader. Lines below the level in force at load
-  time are dropped before crossing into the JVM. FATAL lines are also written
-  to stderr, since glog aborts right after them. Two kinds of output stay on
-  stderr: glog lines before `SegcoreInit` installs the sink (Knowhere's
-  version banner) and text segcore prints without glog. Building with
+  milvus-storage's glog lines take the same path. Each line goes to stderr in
+  one write, laid out as Spark's default console pattern with milliseconds,
+  under the name of the library it comes from (`segcore`, `knowhere` or
+  `storage`); the libraries' own prefixes name the thread. `setLogLevel` sets
+  the level through `SetLogLevel`, as QueryNode applies its `log.level`.
+
+  The lines do not go through the JVM to log4j, because a native thread
+  cannot enter the JVM safely while it exits. Once the JVM has begun to exit,
+  HotSpot parks any thread that enters it for good. Under `System.exit`, the
+  way an executor exits, the native static destructors then run, and
+  segcore's thread pools join their workers: a worker the JVM had attached
+  for a log line never finishes detaching, and the JVM never exits (the
+  probe, which ends in `System.exit`, hung there when the lines went to
+  log4j). glog also holds its log mutex around every sink call, so one thread
+  caught in a log call would block every later line. Writing directly also
+  keeps the lines just before a native crash. In Spark's default
+  configuration log4j's console appender writes to stderr too, so native
+  lines reach the same executor log; appenders, files and layouts configured
+  otherwise do not receive them, and log4j levels do not apply to them. glog
+  lines before `SegcoreInit` installs the sink (Knowhere's version banner)
+  and text segcore prints without glog keep their own format. Building with
   `WITHOUT_GO_LOGGING` would discard the logs.
 - **Process initialization is explicit.** `SegcoreNative.init` runs
   `SegcoreInit`, `InitCpuNum`, the local chunk manager rooted at a directory
@@ -226,7 +234,9 @@ collection fixture (`core/src/test/resources/read-fixtures/collections/api`)
 from their V3 manifests with only `id` and `category`, checks comparison,
 `IN`, `AND`, `OR` and `NOT` there, and cancels one load before it completes.
 Every expected answer is computed from the fixture's literal input rows in
-`expected.json`, never from a read of the stored bytes. `run_probe.sh` copies
+`expected.json`, never from a read of the stored bytes. The probe then leaves
+through `System.exit`, as an executor's JVM does, and `run_probe.sh` fails a
+JVM that has not exited two minutes after it started. `run_probe.sh` copies
 the fixture, makes its manifest base paths absolute for local storage and
 lists the rows for the probe. The probe exercises the build feasibility gate:
 the libraries of one Milvus build load and run together in HotSpot. The
