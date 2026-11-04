@@ -312,8 +312,8 @@ Save the following as `/private/spark-demo-values.yaml`:
 
 ```yaml
 image:
-  repository: milvusdb/spark-milvus
-  tag: "current-spark4.0"
+  repository: registry.example.com/spark-milvus-demo
+  tag: "current-amd64"
   # Prefer digest: sha256:... to pin the image.
 language: python
 example: read
@@ -328,9 +328,9 @@ nodeSelector:
 For Java, set `language: java`; `example: read` then selects the precompiled
 `ReadSnapshot` class. The chart also supports `read`, `filter`, `sql`,
 `partition`. Use `image.pullSecrets` for a
-private registry. For ARM64, change the node selector; the published tag also
-contains an ARM64 image. For a custom single-platform image, match the image
-platform to the node selector.
+private registry. Replace the example repository and tag with the image you
+built and pushed above. For ARM64, build an ARM64 image from matching artifacts
+and change both the image reference and node selector.
 See the chart's [values](../deploy/helm/spark-milvus-demo/values.yaml) for the
 complete configuration, including existing accounts and resource sizing.
 
@@ -421,6 +421,6 @@ output location; see [offline backfill](backfill.md).
 The Helm chart is a deployment template for the documented Spark version and
 this connector's runtime. Image smoke tests and offline template checks do not
 verify a live Kubernetes deployment. The
-[recorded Milvus demo validation](../demo/live-validation.md#recorded-validation)
-used local Spark with real object storage; it does not establish that your
-namespace RBAC, cloud IAM or multi-node network configuration has been tested.
+[read integration tests](contributing.md#tests-that-need-the-native-library)
+exercise local Spark against isolated object storage; they do not establish that
+your namespace RBAC, cloud IAM or multi-node network configuration has been tested.
