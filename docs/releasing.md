@@ -81,6 +81,12 @@ uses its separate product closure. Linux image jobs run the exact reader
 assembly. Search correctness, native search tests and CPU portability belong
 to the repository that owns search.
 
+Darwin consumers run on macOS 15 and 26, as declared in
+[`scripts/release-matrix.json`](../scripts/release-matrix.json); the macOS 14
+hosted runner is retired. Native builds remain on macOS 15 with Apple clang 17
+and a macOS 14.0 deployment target. Consumer host coverage does not change that
+ABI target or establish that the bundle was tested on macOS 14.
+
 Required GitHub check names must match the workflow after the migration. A
 workflow file cannot update repository rules, environment secrets or approval
 settings. The old 2.0 GitHub Release and its assets are retired only after the

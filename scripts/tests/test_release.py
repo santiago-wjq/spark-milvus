@@ -421,7 +421,7 @@ class ReleaseTest(unittest.TestCase):
                                 for field, value in release.system_baseline(platform).items()))
         darwin = next(row for row in self.plan["native"] if row["platform"] == "darwin-aarch64")
         self.assertEqual(darwin["runner"], "macos-15")
-        self.assertEqual([host["runner"] for host in darwin["consumers"]], ["macos-14", "macos-15"])
+        self.assertEqual([host["runner"] for host in darwin["consumers"]], ["macos-15", "macos-26"])
         broken = copy.deepcopy(self.plan)
         next(row for row in broken["native"] if row["platform"] == "darwin-aarch64")["macos"] = "13.0"
         with self.assertRaisesRegex(ValueError, "system ABI baseline"):
@@ -697,7 +697,7 @@ class ReleaseTest(unittest.TestCase):
         # each across both Spark lines.
         self.assertEqual(len(plan["consumer"]), 12)
         self.assertEqual({row["os_version"] for row in plan["consumer"]},
-                         {"ubuntu-22.04", "ubuntu-24.04", "macos-14", "macos-15"})
+                         {"ubuntu-22.04", "ubuntu-24.04", "macos-15", "macos-26"})
         self.assertEqual(set(plan["pins"]), {"milvus-proto", "milvus-storage"})
 
     def test_release_plan_takes_versions_from_the_exported_matrix(self):
