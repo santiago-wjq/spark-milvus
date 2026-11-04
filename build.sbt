@@ -23,7 +23,14 @@ lazy val compileAndRuntime = "compile->compile;runtime->runtime"
 // The root is an aggregate only. Select one Spark line per sbt invocation.
 lazy val root = project
   .in(file("."))
-  .aggregate(nativeRuntime, nativeStorage, nativeVector, nativeSegcore, core, spark)
+  .aggregate(
+    nativeRuntime,
+    nativeStorage,
+    nativeVector,
+    nativeSegcore,
+    core,
+    spark
+  )
   .settings(
     name := "spark-milvus",
     ReadValidation.matrixSettings,
@@ -225,8 +232,11 @@ lazy val core = project
       val library = segcoreLibraryDir.value.getAbsolutePath
       val segcore = options
         .withEnvVars(options.envVars ++ Map("LD_LIBRARY_PATH" -> library))
-        .withRunJVMOptions(options.runJVMOptions :+ s"-Dmilvus.segcore.lib=$library")
-      val segcoreSuite = "com.zilliz.milvus.storage.expr.SegcoreDifferentialTest"
+        .withRunJVMOptions(
+          options.runJVMOptions :+ s"-Dmilvus.segcore.lib=$library"
+        )
+      val segcoreSuite =
+        "com.zilliz.milvus.storage.expr.SegcoreDifferentialTest"
       groups.flatMap { group =>
         val (isolated, remaining) =
           group.tests.partition(_.name == segcoreSuite)
