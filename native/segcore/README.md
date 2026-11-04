@@ -36,9 +36,14 @@ query wherever Milvus's semantics are the ones that apply.
   intended base. With that one change, supplied through
   `FETCHCONTENT_SOURCE_DIR_MILVUS-STORAGE` on top of the storage commit Milvus
   pins, the Milvus build with `-DWITH_JNI=ON` completes and yields both
-  `libknowhere_jni` and `libmilvus-storage-jni`. Until the change is in the
-  storage source this build uses, `build.py` passes `-DWITH_JNI=OFF` and the
-  connector keeps the Knowhere and storage JNI from `native/build`.
+  `libknowhere_jni` and `libmilvus-storage-jni`. milvus-storage main has the
+  change, but no Milvus commit pins it yet, and Milvus cannot simply move:
+  storage main also passes `Properties` to its read APIs as
+  `shared_ptr<const Properties>`, which Milvus master does not compile
+  against. This build therefore keeps the storage commit Milvus pins rather
+  than patching it, `build.py` passes `-DWITH_JNI=OFF`, and the connector keeps
+  the Knowhere and storage JNI from `native/build` until the `milvus` gitlink
+  can move to a Milvus commit whose storage pin has the change.
 - **The JNI is maintained here, over the C interface only.** Milvus does not
   ship a JNI. `src/main/cpp/segcore_jni.cpp` maps one Java method to one C
   call and never includes segcore's C++ headers. When the `milvus` gitlink
@@ -168,6 +173,13 @@ links it as `milvus/cmake_build`, the path the Milvus scripts expect. The
 libraries install under `milvus/internal/core/output/lib`. `--only-jni`
 rebuilds just `libmilvus-segcore-jni` against an existing output.
 
+The Conan output is reused only while the Milvus conanfile and the profile are
+the ones it was installed from, so moving the `milvus` gitlink reinstalls the
+graph instead of building new sources against old packages; `conan` on the
+path must be Conan 2. Knowhere and milvus-storage build from the commits
+Milvus pins, and `build.py` passes that explicitly, which also clears an
+engine source an earlier configure cached.
+
 ## Probe
 
 ```bash
@@ -202,8 +214,8 @@ sealed fixture covers string fields.
 - `PredicateExpr` to PlanNode translation, the offsets-to-bitmap step in the
   row exclusions, and the list of (predicate, type) pairs segcore evaluates,
   each admitted by differential tests.
-- The milvus-storage JNI copy fix, then Knowhere and storage JNI from this
-  build.
+- The `milvus` gitlink moved to a Milvus commit whose storage pin has the
+  JNI copy fix, then Knowhere and storage JNI from this build.
 - Knowhere and milvus-storage gitlinks moved to the Milvus pins and passed to
   the Milvus build through `FETCHCONTENT_SOURCE_DIR_*`, so no source is
   fetched twice.

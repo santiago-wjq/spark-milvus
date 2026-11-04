@@ -23,12 +23,13 @@ sources. This driver only supplies what Milvus leaves to its environment:
   because the Milvus scripts hard-code that path,
 * the C++ protobuf sources, generated from this repository's milvus-proto
   submodule, which must be the commit Milvus's go.mod names,
-* -DWITH_JNI=OFF for now (see build_core),
+* -DWITH_JNI=OFF for now, and the engine sources Milvus pins (see build_core),
 * the segcore JNI library, compiled against the installed Milvus output.
 
 The Go plan parser is not built: the connector builds planpb.PlanNode itself.
 """
 import argparse
+import hashlib
 import os
 import pathlib
 import re
@@ -74,12 +75,25 @@ def link_work_dir(work):
 
 
 def conan_install(work, profile, env):
-    toolchain = work / "conan" / "conan_toolchain.cmake"
-    if toolchain.exists():
-        print(f"conan: reusing {toolchain}")
+    """Install the Milvus conanfile's graph, reusing the output only while the
+    conanfile and the profile are the ones it was installed from: moving the
+    milvus gitlink changes package versions, and a reused output would build
+    the new sources against the old packages."""
+    output = work / "conan"
+    stamp = output / "inputs.sha256"
+    digest = hashlib.sha256((CORE / "conanfile.py").read_bytes() + b"\0" + profile.read_bytes()).hexdigest()
+    if (output / "conan_toolchain.cmake").exists() and stamp.exists() and stamp.read_text().strip() == digest:
+        print(f"conan: reusing {output}, installed from the same conanfile and profile")
         return
-    run(["conan", "install", CORE, "--output-folder", work / "conan", "--build=missing",
+    # Conan 1 reads the profile and fails on its Conan 2 sections, which says
+    # nothing about the version.
+    version = subprocess.run(["conan", "--version"], env=env, check=True, capture_output=True,
+                             text=True).stdout.strip()
+    if not re.search(r"\b2\.\d+\.\d+", version):
+        sys.exit(f"the Milvus conanfile needs Conan 2 (see README); `conan --version` says: {version}")
+    run(["conan", "install", CORE, "--output-folder", output, "--build=missing",
          "-pr:h", profile, "-pr:b", profile], cwd=work, env=env)
+    stamp.write_text(digest + "\n")
 
 
 def cpp_proto_commands():
@@ -137,11 +151,18 @@ def build_core(env, jobs):
     env = dict(env)
     # The engines' JNI stays off: milvus-storage's JNI post-build step copies
     # to ${CMAKE_SOURCE_DIR}/../java/, which resolves outside its own tree
-    # when Milvus is the top-level project, and the build fails. Explicit OFF
-    # also clears a cached ON from an earlier configure. Until storage uses
-    # CMAKE_CURRENT_SOURCE_DIR, the connector's Knowhere and storage JNI come
-    # from native/build.
-    env["CMAKE_EXTRA_ARGS"] = "-DWITH_JNI=OFF"
+    # when Milvus is the top-level project, and the build fails. The fix
+    # (CMAKE_CURRENT_SOURCE_DIR) is in milvus-storage main, past the commit
+    # the pinned Milvus uses; until Milvus moves to it, the connector's
+    # Knowhere and storage JNI come from native/build. Explicit values also
+    # clear what an earlier configure cached: JNI on, or an engine source
+    # supplied through FETCHCONTENT_SOURCE_DIR_*, which an empty value returns
+    # to the commit Milvus pins.
+    env["CMAKE_EXTRA_ARGS"] = " ".join([
+        "-DWITH_JNI=OFF",
+        "-DFETCHCONTENT_SOURCE_DIR_KNOWHERE=",
+        "-DFETCHCONTENT_SOURCE_DIR_MILVUS-STORAGE=",
+    ])
     if jobs:
         env["CMAKE_BUILD_PARALLEL_LEVEL"] = str(jobs)
     run(["bash", MILVUS / "scripts" / "core_build.sh", "-t", "Release"], cwd=MILVUS, env=env)
