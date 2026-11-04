@@ -78,8 +78,10 @@ query wherever Milvus's semantics are the ones that apply.
   defaults. Sealed segments need two more process-wide settings first: the
   cache layer they load through (`configureCache`, `ConfigureTieredStorage`),
   without which a load fails to create its overhead group, and the file
-  system their manifests are read through (`initLocalFileSystem`,
-  `InitArrowFileSystem`).
+  system their manifests are read through (`InitArrowFileSystem`):
+  `initLocalFileSystem` for local storage, `initRemoteFileSystem` for an object
+  store, configured as QueryNode configures it from its `minio` section, the
+  endpoint given as `address:port`.
 - **Sealed segments load the way QueryNode loads them.**
   `NewSegmentWithLoadInfo` takes a `segcorepb.SegmentLoadInfo` with the
   segment's V3 manifest path, storage version 3 and row count, and
@@ -224,8 +226,9 @@ sealed fixture covers string fields.
 ## Not yet done
 
 - Packaging into the platform bundle and loading through `native-runtime`.
-- Remote storage initialization, and scalar indexes, which no fixture carries
-  yet.
+- Tests of remote storage and of scalar indexes. `initRemoteFileSystem` has
+  read a segment Milvus wrote to S3, checked by hand, but no test here covers
+  an object store, and no fixture carries a scalar index.
 - The division of an executor's memory between the planner's native room and
   the cache layer's watermarks, and whether Storage V3 column groups the
   predicates do not read are created lazily

@@ -36,6 +36,18 @@ public final class SegcoreNative {
      */
     public static native void initLocalFileSystem();
 
+    /**
+     * InitArrowFileSystem over an object store, as QueryNode configures it
+     * from its minio section: {@code address} is the endpoint,
+     * {@code storageType} {@code remote} or {@code minio}. The file system is
+     * rooted at the bucket, so manifest base paths start with the root path.
+     * With {@code useIam} the credentials come from the environment and the
+     * keys may be empty.
+     */
+    public static native void initRemoteFileSystem(String address, String bucketName, String rootPath,
+        String storageType, String cloudProvider, String region, String accessKeyId, String secretAccessKey,
+        boolean useSsl, boolean useIam, boolean useVirtualHost, long requestTimeoutMs);
+
     /** NewCollection from a serialized schemapb.CollectionSchema. */
     public static native long newCollection(byte[] schema);
 

@@ -331,6 +331,47 @@ Java_com_zilliz_milvus_jni_segcore_SegcoreNative_initLocalFileSystem(JNIEnv* env
     CheckStatus(env, InitArrowFileSystem(config), "InitArrowFileSystem");
 }
 
+// The same file system over an object store, as QueryNode configures it from
+// its minio section. Keys carry their whole prefix, so the file system is
+// rooted at the bucket and manifest base paths start with the root path; with
+// useIam the keys are the environment's, and accessKeyId and secretAccessKey
+// may be empty.
+JNIEXPORT void JNICALL
+Java_com_zilliz_milvus_jni_segcore_SegcoreNative_initRemoteFileSystem(
+    JNIEnv* env, jclass, jstring address, jstring bucketName, jstring rootPath, jstring storageType,
+    jstring cloudProvider, jstring region, jstring accessKeyId, jstring secretAccessKey, jboolean useSsl,
+    jboolean useIam, jboolean useVirtualHost, jlong requestTimeoutMs) {
+    std::string address_s = Utf(env, address);
+    std::string bucket_s = Utf(env, bucketName);
+    std::string root_s = Utf(env, rootPath);
+    std::string type_s = Utf(env, storageType);
+    std::string provider_s = Utf(env, cloudProvider);
+    std::string region_s = Utf(env, region);
+    std::string key_s = Utf(env, accessKeyId);
+    std::string secret_s = Utf(env, secretAccessKey);
+    CStorageConfig config{};
+    config.address = address_s.c_str();
+    config.bucket_name = bucket_s.c_str();
+    config.access_key_id = key_s.c_str();
+    config.access_key_value = secret_s.c_str();
+    config.root_path = root_s.c_str();
+    config.storage_type = type_s.c_str();
+    config.cloud_provider = provider_s.c_str();
+    config.iam_endpoint = "";
+    config.log_level = "warn";
+    config.region = region_s.c_str();
+    config.useSSL = useSsl == JNI_TRUE;
+    config.sslCACert = "";
+    config.useIAM = useIam == JNI_TRUE;
+    config.useVirtualHost = useVirtualHost == JNI_TRUE;
+    config.requestTimeoutMs = requestTimeoutMs;
+    config.gcp_credential_json = "";
+    config.use_custom_part_upload = true;
+    config.tls_min_version = "";
+    config.talon_coordinator = "";
+    CheckStatus(env, InitArrowFileSystem(config), "InitArrowFileSystem");
+}
+
 JNIEXPORT jlong JNICALL
 Java_com_zilliz_milvus_jni_segcore_SegcoreNative_newCollection(JNIEnv* env, jclass, jbyteArray schema) {
     auto blob = Bytes(env, schema);
