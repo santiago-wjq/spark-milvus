@@ -193,9 +193,14 @@ lazy val core = project
     // structs across, which needs the library path and the java.nio add-opens
     // the Spark lines already get.
     inConfig(Test)(Modules.nativeTest),
-    // Only storage schema messages are generated; no service stubs belong here.
-    Compile / PB.protoSources := Seq(milvusProtoDir.value),
-    Compile / PB.generate / includeFilter := "common.proto" | "schema.proto",
+    // Storage schema messages, and the plan messages segcore takes, from the
+    // copy of Milvus's plan.proto in src/main/protobuf; no service stubs
+    // belong here.
+    Compile / PB.protoSources := Seq(
+      milvusProtoDir.value,
+      (Compile / sourceDirectory).value / "protobuf"
+    ),
+    Compile / PB.generate / includeFilter := "common.proto" | "schema.proto" | "plan.proto",
     Compile / PB.targets := Seq(
       scalapb.gen(grpc = false) -> (Compile / sourceManaged).value / "scalapb"
     )

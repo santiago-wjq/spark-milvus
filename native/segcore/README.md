@@ -116,8 +116,15 @@ query wherever Milvus's semantics are the ones that apply.
   every five seconds. The obligations the parser would otherwise meet move
   here: type checking against the schema, constant conversion, and sorted,
   distinct `IN` value lists, which segcore relies on regardless of the
-  rewriter's optimization switch. `plan.proto` changes show in the gitlink
-  diff, as `*_c.h` changes do. The same holds for `milvus.filter`: its
+  rewriter's optimization switch. `SegcorePlan` in `core` meets them,
+  describing each field as the parser does, and builds the messages from
+  `core/src/main/protobuf/plan.proto`, an unchanged copy of the file at the
+  gitlink: `build.py` fails while the two differ, so `plan.proto` changes show
+  when the gitlink moves, as `*_c.h` changes do. A predicate translates when
+  segcore can state it, and stays with the JVM evaluator otherwise:
+  floating-point fields, null literals in comparisons and `IN` lists,
+  null-safe equality with a value, ordering on booleans and out-of-range
+  integers do not translate. Nor does `milvus.filter` use the Go parser: its
   expression is parsed by the connector's own front end, which today accepts a
   bounded subset of Plan.g4 and rejects the rest, so wider Milvus syntax means
   a wider front end in the JVM, not the Go parser on the driver or anywhere
@@ -211,9 +218,9 @@ sealed fixture covers string fields.
   the cache layer's watermarks, and whether Storage V3 column groups the
   predicates do not read are created lazily
   (`SegcoreSetLazyColumnGroupEnabled`).
-- `PredicateExpr` to PlanNode translation, the offsets-to-bitmap step in the
-  row exclusions, and the list of (predicate, type) pairs segcore evaluates,
-  each admitted by differential tests.
+- The list of (predicate, type) pairs segcore evaluates, each admitted by
+  differential tests against `PredicateEvaluator`, and the offsets-to-bitmap
+  step in the row exclusions.
 - The `milvus` gitlink moved to a Milvus commit whose storage pin has the
   JNI copy fix, then Knowhere and storage JNI from this build.
 - Knowhere and milvus-storage gitlinks moved to the Milvus pins and passed to

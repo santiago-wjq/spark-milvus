@@ -622,8 +622,12 @@ exercise their request/response checks without requiring a production service.
 
 ## Storage protobufs
 
-Only `common.proto` and `schema.proto` are generated into `core`, with
-`grpc = false`, because snapshots embed the protobuf `CollectionSchema`.
+Only `common.proto`, `schema.proto` and `plan.proto` are generated into
+`core`, with `grpc = false`: snapshots embed the protobuf `CollectionSchema`,
+and segcore takes its plans as `planpb.PlanNode`. `plan.proto` belongs to the
+Milvus repository, not to `milvus-proto`, so `core/src/main/protobuf` holds an
+unchanged copy of the file at the `milvus` gitlink, which
+`native/segcore/build/build.py` checks; copy it again when the gitlink moves.
 Public builds generate no Milvus service stubs.
 
 ## Jackson

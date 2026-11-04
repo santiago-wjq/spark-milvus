@@ -23,6 +23,7 @@ sources. This driver only supplies what Milvus leaves to its environment:
   because the Milvus scripts hard-code that path,
 * the C++ protobuf sources, generated from this repository's milvus-proto
   submodule, which must be the commit Milvus's go.mod names,
+* a check that core's copy of plan.proto is the file at the milvus gitlink,
 * -DWITH_JNI=OFF for now, and the engine sources Milvus pins (see build_core),
 * the segcore JNI library, compiled against the installed Milvus output.
 
@@ -44,6 +45,7 @@ CORE = MILVUS / "internal" / "core"
 OUTPUT = CORE / "output"
 JNI_SOURCE = ROOT / "native" / "segcore" / "src" / "main" / "cpp"
 MILVUS_PROTO = ROOT / "milvus-proto"
+CORE_PLAN_PROTO = ROOT / "core" / "src" / "main" / "protobuf" / "plan.proto"
 PROTO_MODULE = "github.com/milvus-io/milvus-proto/go-api/v3"
 
 # Rust toolchain the Milvus scripts install for the storage bridge and tantivy.
@@ -138,6 +140,19 @@ def check_milvus_proto():
                  "move the milvus-proto gitlink with the milvus gitlink")
 
 
+def check_plan_proto():
+    """core's copy of plan.proto must be the file at the milvus gitlink.
+
+    core builds segcore's plans from that copy, since the milvus submodule is
+    opt-in; a gitlink move that changes plan.proto stops here until the copy
+    follows, so the change is reviewed with the C interface changes.
+    """
+    pinned = MILVUS / "pkg" / "proto" / "plan.proto"
+    if CORE_PLAN_PROTO.read_bytes() != pinned.read_bytes():
+        sys.exit(f"{CORE_PLAN_PROTO.relative_to(ROOT)} differs from {pinned.relative_to(ROOT)} at the milvus "
+                 f"gitlink; copy it: cp {pinned.relative_to(ROOT)} {CORE_PLAN_PROTO.relative_to(ROOT)}")
+
+
 def generate_proto(work, env):
     check_milvus_proto()
     protoc = work / "bin" / "protoc"
@@ -196,6 +211,7 @@ def main():
         sys.exit("initialize the milvus submodule first: git submodule update --init milvus")
     if "JAVA_HOME" not in os.environ:
         sys.exit("JAVA_HOME must name the JDK whose headers the JNI targets compile against")
+    check_plan_proto()
 
     work = args.work_dir.resolve()
     work.mkdir(parents=True, exist_ok=True)
