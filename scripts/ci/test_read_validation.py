@@ -229,8 +229,7 @@ class MatrixTest(unittest.TestCase):
         for project in ("spark", "integration", "core"):
             self.assertEqual(validation.report_directory(project),
                              validation.ROOT / project / "target/test-reports")
-        for project, directory in (("native-runtime", "native/runtime"), ("native-storage", "native/storage"),
-                                   ("native-vector", "native/vector")):
+        for project, directory in (("native-runtime", "native/runtime"), ("native-storage", "native/storage")):
             self.assertEqual(validation.report_directory(project),
                              validation.ROOT / directory / "target/test-reports")
 

@@ -1,6 +1,8 @@
 /** Application dependency versions and the Spark compatibility matrix. */
 object Versions {
 
+  val iceberg = "1.10.2"
+
   val scala212 = "2.12.20"
   val scala213 = "2.13.16"
 
@@ -126,7 +128,7 @@ object Versions {
     )
     val shared = sharedScalas.map { scala =>
       val modules = Seq("native-storage", "core") ++
-        (if (scala == scala213) Seq("native-runtime", "native-vector")
+        (if (scala == scala213) Seq("native-runtime")
          else Seq.empty)
       JSONObject(
         Map(

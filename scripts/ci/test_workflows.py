@@ -49,7 +49,7 @@ class WorkflowGateTest(unittest.TestCase):
         runs = [step.get("run", "") for step in aggregate["steps"]]
         # The shared modules' tests run once, in the matrix; the aggregate keeps
         # the default line's whole Spark suite.
-        self.assertIn("sbt spark/test", runs)
+        self.assertIn("sbt spark/test backfill/test", runs)
         self.assertNotIn("sbt test", runs)
         # Each source matrix job holds its own combination to the clean
         # contract, so no job recompiles the whole matrix to clean it.
@@ -355,9 +355,9 @@ class WorkflowGateTest(unittest.TestCase):
         })
         self.assertEqual(build["permissions"], {"actions": "read", "contents": "read"})
         self.assertNotIn("if", build["jobs"]["jvm"])
-        for name in ("native", "native-cpu", "darwin-reads", "candidate"):
+        for name in ("native", "darwin-reads", "candidate"):
             self.assertEqual(build["jobs"][name]["if"], "inputs.build_native")
-        self.assertEqual(set(build["jobs"]["candidate"]["needs"]), {"native", "native-cpu", "darwin-reads", "jvm"})
+        self.assertEqual(set(build["jobs"]["candidate"]["needs"]), {"native", "darwin-reads", "jvm", "thin"})
         # The macOS read suites run on the darwin bundle before any candidate is assembled.
         darwin = build["jobs"]["darwin-reads"]
         self.assertEqual(darwin["runs-on"], "macos-15")
@@ -390,18 +390,15 @@ class WorkflowGateTest(unittest.TestCase):
 
     def test_thin_modules_are_exported_without_native_and_staged_with_the_same_candidate(self):
         jobs = workflow("build-artifacts.yml")["jobs"]
-        steps = jobs["jvm"]["steps"]
+        steps = jobs["thin"]["steps"]
+        self.assertEqual(jobs["thin"]["strategy"]["matrix"], "${{ fromJSON(needs.plan.outputs.thin) }}")
+        self.assertNotIn("if", jobs["thin"])
         export = next(step for step in steps if "releaseThinArtifacts" in step.get("run", ""))
-        # Every release line exports its thin Spark module from its own selection.
-        self.assertNotIn("if", export)
-        self.assertEqual(export["env"], {"RELEASE_VERSION": "${{ inputs.version }}",
-                                         "SPARK_LINE": "${{ matrix.line }}",
-                                         "SCALA_VERSION": "${{ matrix.scala }}"})
-        self.assertEqual(export["run"], 'sbt "-DsparkVersion=$SPARK_LINE" "-DscalaVersion=$SCALA_VERSION" '
-                                        '"-Drelease.version=$RELEASE_VERSION" "spark/releaseThinArtifacts"')
-        upload = next(step for step in steps if step.get("with", {}).get("name") == "thin-${{ matrix.line }}")
-        self.assertNotIn("if", upload)
-        self.assertEqual(upload["with"]["path"], "target/release-thin/${{ matrix.line }}/")
+        self.assertEqual(export["env"]["RELEASE_VERSION"], "${{ inputs.version }}")
+        self.assertIn('"$project/releaseThinArtifacts"', export["run"])
+        self.assertIn('project=backfill', export["run"])
+        upload = next(step for step in steps if step.get("uses", "").startswith("actions/upload-artifact"))
+        self.assertEqual(upload["with"]["path"], "target/release-thin/${{ matrix.line }}/${{ matrix.scalaBinary }}/${{ matrix.product }}/")
         self.assertEqual(upload["with"]["if-no-files-found"], "error")
         self.assertLess(steps.index(export), steps.index(upload))
         candidate = jobs["candidate"]["steps"]
@@ -411,24 +408,12 @@ class WorkflowGateTest(unittest.TestCase):
         self.assertLess(candidate.index(download), candidate.index(stage))
         self.assertNotIn("--thin-only", stage["run"])
 
-    def test_native_cpu_gate_cannot_be_bypassed_by_a_bundle_cache_hit(self):
+    def test_public_native_build_has_no_search_component(self):
         build = workflow("build-artifacts.yml")
-        cpu = build["jobs"]["native-cpu"]
-        self.assertEqual(cpu["needs"], "native")
-        self.assertEqual(cpu["runs-on"], "ubuntu-24.04")
-        self.assertEqual(cpu["if"], "inputs.build_native")
-        self.assertNotIn("continue-on-error", cpu)
-        steps = cpu["steps"]
-        download = next(step for step in steps if step.get("uses", "").startswith("actions/download-artifact@"))
-        self.assertEqual(download["with"]["name"], "native-linux-x86_64")
-        check = next(step for step in steps if "scripts/check-native-cpu.py" in step.get("run", ""))
-        self.assertNotIn("if", check)
-        self.assertNotIn("continue-on-error", check)
-        self.assertIn("--bundle native-input/milvus-native-linux-x86_64.jar", check["run"])
-        self.assertLess(steps.index(download), steps.index(check))
-        upload = next(step for step in steps if step.get("uses", "").startswith("actions/upload-artifact@"))
-        self.assertEqual(upload["if"], "always()")
-        self.assertFalse(upload["with"]["name"].startswith("native-linux-"))
+        self.assertNotIn("native-cpu", build["jobs"])
+        for job in build["jobs"].values():
+            for step in job.get("steps", []):
+                self.assertNotIn("knowhere", step.get("run", "").lower())
 
     def test_native_cache_hit_still_requires_current_audit(self):
         native = workflow("build-artifacts.yml")["jobs"]["native"]
@@ -440,7 +425,7 @@ class WorkflowGateTest(unittest.TestCase):
         branch_bundle = by_name["Restore the exact-commit branch native artifact"]
         branch_verify = by_name["Verify the exact-commit branch native artifact"]
         dependencies = by_name["Restore compatible native dependencies"]
-        build = by_name["Build both native engines on a bundle cache miss"]
+        build = by_name["Build Storage and its JNI bindings on a bundle cache miss"]
         audit = by_name["Audit the native ABI on every build and cache hit"]
         trim = by_name["Trim dependency caches before saving"]
         self.assertLess(steps.index(prepare), steps.index(fingerprint))
@@ -512,13 +497,13 @@ class WorkflowGateTest(unittest.TestCase):
 
     def test_release_image_is_assembled_from_the_audited_bundle_and_smoke_tested(self):
         build = workflow("build-artifacts.yml")
-        self.assertEqual(set(build["jobs"]["plan"]["outputs"]), {"native", "jvm", "image"})
+        self.assertEqual(set(build["jobs"]["plan"]["outputs"]), {"native", "jvm", "image", "thin"})
         plan = next(step for step in build["jobs"]["plan"]["steps"] if step.get("id") == "plan")["run"]
         self.assertIn("'linux-x86_64': 'linux/amd64', 'linux-aarch64': 'linux/arm64'", plan)
         self.assertIn("must build every Linux native platform", plan)
         assembly = build["jobs"]["assembly"]
         self.assertEqual(assembly["if"], "inputs.build_native")
-        self.assertEqual(set(assembly["needs"]), {"plan", "native", "native-cpu"})
+        self.assertEqual(set(assembly["needs"]), {"plan", "native"})
         self.assertEqual(assembly["strategy"]["matrix"], "${{ fromJSON(needs.plan.outputs.image) }}")
         self.assertEqual(assembly["runs-on"], "${{ matrix.runner }}")
         self.assertNotIn("environment", assembly)
@@ -542,8 +527,8 @@ class WorkflowGateTest(unittest.TestCase):
         self.assertIn("--plan release-inputs/plan.json", runs[stage])
         self.assertIn("--native-bundle", runs[stage])
         self.assertNotIn("--push", runs[smoke])
-        self.assertIn("run.sh python 04_exact_search.py", runs[smoke])
-        self.assertIn("run.sh java IndexSearch --explain", runs[smoke])
+        self.assertIn("run.sh python 01_read_snapshot.py", runs[smoke])
+        self.assertIn("run.sh java FilterProject --explain", runs[smoke])
         self.assertEqual(assembly["steps"][upload]["with"]["name"], "assembly-${{ matrix.platform }}")
         self.assertEqual(assembly["steps"][upload]["with"]["if-no-files-found"], "error")
         self.assertTrue((ROOT / "scripts/ci/assembly_image.py").is_file())
