@@ -1,0 +1,54 @@
+name: macOS 26 provisioning probe
+
+# Temporary fork-only capacity and toolchain diagnostic. This job produces no
+# candidate and does not replace native compilation or compatibility gates.
+on:
+  push:
+    branches: [codex/macos26-provisioning-probe]
+
+permissions:
+  contents: read
+
+jobs:
+  provision:
+    name: Provision the existing Darwin toolchain on macOS 26
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Read the pinned Java version
+        id: toolchain
+        run: python3 -c 'import json; print("java=" + json.load(open("native/build/toolchain.json"))["java"])' >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ steps.toolchain.outputs.java }}
+      - name: Select the preinstalled Apple clang 17 toolchain
+        run: |
+          test -d /Applications/Xcode_26.2.app
+          sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
+          uname -m
+          sw_vers
+          xcodebuild -version
+          clang --version
+          xcrun --show-sdk-version
+          df -h "$RUNNER_TEMP"
+      - name: Run the unchanged Darwin prerequisites
+        run: scripts/ci/prepare_native.sh darwin-aarch64
+      - name: Verify the selected tools and native support libraries
+        run: |
+          test "$(uname -m)" = arm64
+          test "$MACOSX_DEPLOYMENT_TARGET" = 14.0
+          test -f "$LIBCLANG_PATH/libclang.dylib"
+          test -f "$JAVA_HOME/lib/libjsig.dylib"
+          clang --version
+          rustc --version
+          java -version
+          cmake --version
+          conan --version
+          df -h "$RUNNER_TEMP"
