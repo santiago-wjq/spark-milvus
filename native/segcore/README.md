@@ -81,11 +81,15 @@ query wherever Milvus's semantics are the ones that apply.
   system their manifests are read through (`InitArrowFileSystem`):
   `initLocalFileSystem` for local storage, `initRemoteFileSystem` for an object
   store, configured as QueryNode configures it from its `minio` section, the
-  endpoint given as `address:port`.
+  endpoint given as `address:port`. Indexes need a third, the remote chunk
+  manager over the same object store (`initRemoteChunkManager`,
+  `InitRemoteChunkManagerSingleton`): segcore's index file managers are valid
+  only with one, and it reads the index files written before the packed V3
+  format, while packed V3 files come through the file system.
 - **Sealed segments load the way QueryNode loads them.**
   `NewSegmentWithLoadInfo` takes a `segcorepb.SegmentLoadInfo` with the
   segment's V3 manifest path, storage version 3 and row count, and
-  `SegmentLoad` reads the column groups the manifest lists. Three properties
+  `SegmentLoad` reads the column groups the manifest lists. Four properties
   of that path shape the connector's use of it:
   - The collection schema must include the system fields `RowID` (0) and
     `Timestamp` (1), as RootCoord appends them to every collection: a column
@@ -100,6 +104,12 @@ query wherever Milvus's semantics are the ones that apply.
     system is rooted at the bucket and keys start with its root path; for
     local storage segcore roots it at `/`, so local keys are absolute paths
     and `root_path` is not consulted.
+  - Indexes come in the load info's `index_infos`, one `FieldIndexInfo` per
+    index with its files and versions, `current_scalar_index_version` among
+    them, and the params QueryCoord passes on. QueryCoord appends the load's
+    priority to those params as `load_priority` (`HIGH` or `LOW`), and
+    segcore reads that key for every index: without it the load fails with a
+    JSON type error.
 
   A load takes a cancellation source. A cancelled load stops with segcore's
   cancellation error (code 2038 at the pinned Milvus), and the segment can be
@@ -226,9 +236,18 @@ sealed fixture covers string fields.
 ## Not yet done
 
 - Packaging into the platform bundle and loading through `native-runtime`.
-- Tests of remote storage and of scalar indexes. `initRemoteFileSystem` has
-  read a segment Milvus wrote to S3, checked by hand, but no test here covers
-  an object store, and no fixture carries a scalar index.
+- Tests of remote storage and of scalar indexes. `initRemoteFileSystem` and
+  `initRemoteChunkManager` have loaded a segment Milvus wrote to S3 together
+  with its BITMAP, INVERTED, STL_SORT and TRIE indexes in packed V3 files,
+  checked by hand against the rows written, but no test here covers an object
+  store, and no fixture carries a scalar index.
+- A clean exit with both the remote file system and the remote chunk manager
+  initialized. segcore's chunk managers take a reference to the AWS SDK
+  (`Aws::InitAPI`) and never release it, which Milvus's Go process, exiting
+  without C++ static destructors, never notices. milvus-storage releases its
+  own reference at exit, so the SDK stays initialized while its static
+  objects are destroyed, and one of its event-loop threads can then crash the
+  JVM in the SDK's log redirection (SIGSEGV).
 - The division of an executor's memory between the planner's native room and
   the cache layer's watermarks, and whether Storage V3 column groups the
   predicates do not read are created lazily

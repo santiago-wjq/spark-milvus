@@ -181,6 +181,51 @@ LogEnv() {
     return env;
 }
 
+// An object store as QueryNode configures it from its minio section, owning
+// the strings its CStorageConfig points at. Every string field is set: the
+// chunk manager copies each into a std::string. With useIam the keys are the
+// environment's, and the access key and secret may be empty.
+struct RemoteStorage {
+    std::string address, bucket, root, type, provider, region, key, secret;
+    bool use_ssl, use_iam, use_virtual_host;
+    int64_t request_timeout_ms;
+
+    CStorageConfig
+    Config() const {
+        CStorageConfig config{};
+        config.address = address.c_str();
+        config.bucket_name = bucket.c_str();
+        config.access_key_id = key.c_str();
+        config.access_key_value = secret.c_str();
+        config.root_path = root.c_str();
+        config.storage_type = type.c_str();
+        config.cloud_provider = provider.c_str();
+        config.iam_endpoint = "";
+        config.log_level = "warn";
+        config.region = region.c_str();
+        config.useSSL = use_ssl;
+        config.sslCACert = "";
+        config.useIAM = use_iam;
+        config.useVirtualHost = use_virtual_host;
+        config.requestTimeoutMs = request_timeout_ms;
+        config.gcp_credential_json = "";
+        config.use_custom_part_upload = true;
+        config.tls_min_version = "";
+        config.talon_coordinator = "";
+        return config;
+    }
+};
+
+RemoteStorage
+ReadRemoteStorage(JNIEnv* env, jstring address, jstring bucketName, jstring rootPath, jstring storageType,
+                  jstring cloudProvider, jstring region, jstring accessKeyId, jstring secretAccessKey,
+                  jboolean useSsl, jboolean useIam, jboolean useVirtualHost, jlong requestTimeoutMs) {
+    return RemoteStorage{Utf(env, address),       Utf(env, bucketName),      Utf(env, rootPath),
+                         Utf(env, storageType),   Utf(env, cloudProvider),   Utf(env, region),
+                         Utf(env, accessKeyId),   Utf(env, secretAccessKey), useSsl == JNI_TRUE,
+                         useIam == JNI_TRUE,      useVirtualHost == JNI_TRUE, requestTimeoutMs};
+}
+
 }  // namespace
 
 extern "C" {
@@ -331,45 +376,34 @@ Java_com_zilliz_milvus_jni_segcore_SegcoreNative_initLocalFileSystem(JNIEnv* env
     CheckStatus(env, InitArrowFileSystem(config), "InitArrowFileSystem");
 }
 
-// The same file system over an object store, as QueryNode configures it from
-// its minio section. Keys carry their whole prefix, so the file system is
-// rooted at the bucket and manifest base paths start with the root path; with
-// useIam the keys are the environment's, and accessKeyId and secretAccessKey
-// may be empty.
+// The same file system over an object store. Keys carry their whole prefix,
+// so the file system is rooted at the bucket and manifest base paths start
+// with the root path.
 JNIEXPORT void JNICALL
 Java_com_zilliz_milvus_jni_segcore_SegcoreNative_initRemoteFileSystem(
     JNIEnv* env, jclass, jstring address, jstring bucketName, jstring rootPath, jstring storageType,
     jstring cloudProvider, jstring region, jstring accessKeyId, jstring secretAccessKey, jboolean useSsl,
     jboolean useIam, jboolean useVirtualHost, jlong requestTimeoutMs) {
-    std::string address_s = Utf(env, address);
-    std::string bucket_s = Utf(env, bucketName);
-    std::string root_s = Utf(env, rootPath);
-    std::string type_s = Utf(env, storageType);
-    std::string provider_s = Utf(env, cloudProvider);
-    std::string region_s = Utf(env, region);
-    std::string key_s = Utf(env, accessKeyId);
-    std::string secret_s = Utf(env, secretAccessKey);
-    CStorageConfig config{};
-    config.address = address_s.c_str();
-    config.bucket_name = bucket_s.c_str();
-    config.access_key_id = key_s.c_str();
-    config.access_key_value = secret_s.c_str();
-    config.root_path = root_s.c_str();
-    config.storage_type = type_s.c_str();
-    config.cloud_provider = provider_s.c_str();
-    config.iam_endpoint = "";
-    config.log_level = "warn";
-    config.region = region_s.c_str();
-    config.useSSL = useSsl == JNI_TRUE;
-    config.sslCACert = "";
-    config.useIAM = useIam == JNI_TRUE;
-    config.useVirtualHost = useVirtualHost == JNI_TRUE;
-    config.requestTimeoutMs = requestTimeoutMs;
-    config.gcp_credential_json = "";
-    config.use_custom_part_upload = true;
-    config.tls_min_version = "";
-    config.talon_coordinator = "";
-    CheckStatus(env, InitArrowFileSystem(config), "InitArrowFileSystem");
+    RemoteStorage storage = ReadRemoteStorage(env, address, bucketName, rootPath, storageType, cloudProvider, region,
+                                              accessKeyId, secretAccessKey, useSsl, useIam, useVirtualHost,
+                                              requestTimeoutMs);
+    CheckStatus(env, InitArrowFileSystem(storage.Config()), "InitArrowFileSystem");
+}
+
+// The remote chunk manager over the same object store. segcore loads no index
+// without it: an index's file manager context is valid only with a chunk
+// manager, and index files written before the packed V3 format are read
+// through it. Packed V3 index files are read through the file system, as
+// column groups are.
+JNIEXPORT void JNICALL
+Java_com_zilliz_milvus_jni_segcore_SegcoreNative_initRemoteChunkManager(
+    JNIEnv* env, jclass, jstring address, jstring bucketName, jstring rootPath, jstring storageType,
+    jstring cloudProvider, jstring region, jstring accessKeyId, jstring secretAccessKey, jboolean useSsl,
+    jboolean useIam, jboolean useVirtualHost, jlong requestTimeoutMs) {
+    RemoteStorage storage = ReadRemoteStorage(env, address, bucketName, rootPath, storageType, cloudProvider, region,
+                                              accessKeyId, secretAccessKey, useSsl, useIam, useVirtualHost,
+                                              requestTimeoutMs);
+    CheckStatus(env, InitRemoteChunkManagerSingleton(storage.Config()), "InitRemoteChunkManagerSingleton");
 }
 
 JNIEXPORT jlong JNICALL

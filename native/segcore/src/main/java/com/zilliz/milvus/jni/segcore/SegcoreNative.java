@@ -48,6 +48,17 @@ public final class SegcoreNative {
         String storageType, String cloudProvider, String region, String accessKeyId, String secretAccessKey,
         boolean useSsl, boolean useIam, boolean useVirtualHost, long requestTimeoutMs);
 
+    /**
+     * InitRemoteChunkManagerSingleton over the same object store, with the same
+     * arguments as {@link #initRemoteFileSystem}. segcore loads no index
+     * without it: index files written before the packed V3 format are read
+     * through it, and packed V3 index files through the file system, which
+     * still needs a chunk manager beside it.
+     */
+    public static native void initRemoteChunkManager(String address, String bucketName, String rootPath,
+        String storageType, String cloudProvider, String region, String accessKeyId, String secretAccessKey,
+        boolean useSsl, boolean useIam, boolean useVirtualHost, long requestTimeoutMs);
+
     /** NewCollection from a serialized schemapb.CollectionSchema. */
     public static native long newCollection(byte[] schema);
 
