@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import unittest
 
-from dependency_versions import selected_references, validate_upstream_versions
+from dependency_versions import selected_references, selected_transitive_references, validate_upstream_versions
 
 
 class VersionSelectionTest(unittest.TestCase):
@@ -26,6 +26,17 @@ class VersionSelectionTest(unittest.TestCase):
         for name, reference in self.constraints["references"].items():
             with self.subTest(name=name):
                 self.assertRegex(reference, r"^[^/]+/[^#]+#[0-9a-f]{32}$")
+
+    def test_transitive_recipes_are_exact_and_do_not_become_direct_requirements(self):
+        direct = selected_references(self.constraints, conan_os="Linux")
+        transitive = selected_transitive_references(self.constraints, conan_os="Linux")
+        self.assertFalse(set(direct) & set(transitive))
+        for name, reference in transitive.items():
+            with self.subTest(name=name):
+                self.assertRegex(reference, r"^" + name + r"/[^#]+#[0-9a-f]{32}$")
+        self.assertIn("s2n", transitive)
+        self.assertNotIn("s2n", selected_transitive_references(self.constraints, conan_os="Macos"))
+        self.assertIn("aws-c-event-stream", transitive)
 
     def test_selects_newer_numeric_and_reviewed_commit_versions(self):
         storage = '\n'.join(['self.requires("fmt/11.2.0#old")',

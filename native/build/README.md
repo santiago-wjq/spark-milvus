@@ -17,7 +17,14 @@ Changing the Storage gitlink requires a fresh native bundle.
 
 ## Toolchain and dependency graph
 
-`dependencies.json` pins exact upstream recipe revisions. The build consumes
+`dependencies.json` pins exact upstream recipe revisions. Its
+`transitive_references` records the AWS CRT recipe family validated with the
+pinned Milvus AWS SDK recipe. Conan Center can publish a different recipe for the
+same version with incompatible dependency requirements; an empty cache must
+resolve the same reviewed family as an existing cache. The driver supplies these
+revisions through a partial seed lock, without adding direct dependencies or
+forcing different upstream versions. The resulting complete lock must retain
+every selected recipe revision. The build consumes
 those recipes without patching them or exporting project-owned replacements.
 `profiles/` and `platforms.py` supply the Conan profile and platform adapter;
 a platform needs both. Linux profiles select GCC 12 and C++20. Darwin profiles
@@ -77,7 +84,7 @@ writers to the same work directory.
 
 The driver checks upstream dependency declarations, selects pinned references,
 and writes a full Conan lock before installing packages. `--conan-lock` can
-reuse a reviewed lock in a new work directory; its direct recipes must match the
+reuse a reviewed lock in a new work directory; its direct and reviewed transitive recipes must match the
 current selection and it must cover every resolved host and build dependency.
 The generated host and build profiles replace dependency ranges with the exact
 selected references, including tool dependencies in the build context.
@@ -123,6 +130,8 @@ hashes do not replace these checks. Component source and extension manifests
 are included with the normalized evidence delivered in the bundle.
 
 Top-level `references` adds or selects exact Conan recipe revisions.
+`transitiveReferences` can extend the reviewed recipe seed without adding direct
+requirements; platform scopes apply to both kinds of pin.
 `versionPolicy` supplies version ordering and excluded requirement rules;
 its nested maps extend the Storage policy. `platformScope` and `staticOn`
 apply platform restrictions. `conanOptions` and `conanConf` become explicit
