@@ -312,7 +312,8 @@ object MilvusBackfill {
         collectionFieldNames = false,
         expectedSnapshot = None,
         beforeWrite = () => (),
-        snapshotAdapter = snapshotAdapter
+        snapshotAdapter = snapshotAdapter,
+        onResult = identity
       )
     }
   }
@@ -343,7 +344,8 @@ object MilvusBackfill {
         collectionFieldNames = true,
         expectedSnapshot = None,
         beforeWrite = () => (),
-        snapshotAdapter = BackfillSnapshotAdapter.V3Only
+        snapshotAdapter = BackfillSnapshotAdapter.V3Only,
+        onResult = identity
       )
     }
   }
@@ -412,7 +414,11 @@ object MilvusBackfill {
 
   /** Uses an already resolved storage identity and validates the expected
     * collection/snapshot before writing. Input columns use collection field
-    * names. The callback runs after validation, immediately before writing.
+    * names. beforeWrite runs after validation, immediately before writing.
+    * onResult runs once on the driver after successful computation, before
+    * owned resources close. It can durably record and return the result;
+    * failures in it or subsequent cleanup still fail the operation. Neither
+    * callback is serialized into Spark tasks.
     */
   def runPrepared(
       spark: SparkSession,
@@ -423,7 +429,8 @@ object MilvusBackfill {
       expectedCollectionId: Long,
       expectedSnapshotName: String,
       beforeWrite: () => Unit,
-      snapshotAdapter: BackfillSnapshotAdapter
+      snapshotAdapter: BackfillSnapshotAdapter,
+      onResult: BackfillResult => BackfillResult
   ): Either[BackfillError, BackfillResult] =
     runInternal(
       spark,
@@ -433,11 +440,13 @@ object MilvusBackfill {
       collectionFieldNames = true,
       expectedSnapshot = Some(expectedCollectionId -> expectedSnapshotName),
       beforeWrite = beforeWrite,
-      snapshotAdapter = snapshotAdapter
+      snapshotAdapter = snapshotAdapter,
+      onResult = onResult
     )
 
   /** Borrow a caller's resolved Spark plan without reopening or closing its
-    * source.
+    * source. onResult has the same driver and cleanup contract as the path
+    * overload.
     */
   def runPrepared(
       input: DataFrame,
@@ -446,7 +455,8 @@ object MilvusBackfill {
       expectedCollectionId: Long,
       expectedSnapshotName: String,
       beforeWrite: () => Unit,
-      snapshotAdapter: BackfillSnapshotAdapter
+      snapshotAdapter: BackfillSnapshotAdapter,
+      onResult: BackfillResult => BackfillResult
   ): Either[BackfillError, BackfillResult] = {
     if (input == null || input.isStreaming)
       return Left(
@@ -460,7 +470,8 @@ object MilvusBackfill {
       collectionFieldNames = true,
       expectedSnapshot = Some(expectedCollectionId -> expectedSnapshotName),
       beforeWrite = beforeWrite,
-      snapshotAdapter = snapshotAdapter
+      snapshotAdapter = snapshotAdapter,
+      onResult = onResult
     )
   }
 
@@ -472,7 +483,8 @@ object MilvusBackfill {
       collectionFieldNames: Boolean,
       expectedSnapshot: Option[(Long, String)],
       beforeWrite: () => Unit,
-      snapshotAdapter: BackfillSnapshotAdapter
+      snapshotAdapter: BackfillSnapshotAdapter,
+      onResult: BackfillResult => BackfillResult
   ): Either[BackfillError, BackfillResult] = {
     val startTime = System.currentTimeMillis()
     val runConfig = config
@@ -759,7 +771,7 @@ object MilvusBackfill {
         totalBackfillDataRows = backfillRowCount
       )
 
-      Right(result.copy(inputSnapshotId = inputSnapshotId))
+      Right(onResult(result.copy(inputSnapshotId = inputSnapshotId)))
 
     }
     withCleanup(
