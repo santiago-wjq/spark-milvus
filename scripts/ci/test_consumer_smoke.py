@@ -29,7 +29,7 @@ class ConsumerTest(unittest.TestCase):
         with zipfile.ZipFile(path, "w") as archive:
             archive.writestr("META-INF/identity", artifact)
             if platform:
-                archive.writestr(f"native/milvus/1/{platform}/manifest.properties", "format.version=1")
+                archive.writestr(f"native/milvus/2/{platform}/manifest.properties", "format.version=2")
         return {"artifactId": artifact, "extension": "jar", "classifier": None,
                 "sha256": consumer.digest(path), "path": path.name}
 
@@ -120,12 +120,12 @@ class ConsumerTest(unittest.TestCase):
         _, expected = consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "platform")
         self.keep(expected)
         with zipfile.ZipFile(self.ivy / "jars/other.group_bad.jar", "w") as archive:
-            archive.writestr("native/milvus/1/linux-aarch64/manifest.properties", "format.version=1")
+            archive.writestr("native/milvus/2/linux-aarch64/manifest.properties", "format.version=2")
         with self.assertRaisesRegex(RuntimeError, "Resolved native platforms"):
             consumer.check_resolved(self.ivy, expected)
 
     def thin_manifest(self):
-        names = ("native-runtime", "native-vector", "native-storage_2.13",
+        names = ("native-runtime", "native-storage_2.13",
                  "core_2.13", "4.0-thin_2.13")
         return {"plan": {"distribution": "thin", "native": []},
                 "artifacts": [self.jar("spark-milvus-" + name) for name in names]}
@@ -134,7 +134,7 @@ class ConsumerTest(unittest.TestCase):
         manifest = self.thin_manifest()
         entry, expected = consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "thin")
         self.assertEqual(entry, "spark-milvus-4.0-thin_2.13")
-        self.assertEqual(len(consumer.check_resolved(self.ivy, expected)), 5)
+        self.assertEqual(len(consumer.check_resolved(self.ivy, expected)), 4)
         self.jar("spark-milvus-4.0-jvm_2.13")
         with self.assertRaisesRegex(RuntimeError, "different connector artifacts"):
             consumer.check_resolved(self.ivy, expected)
@@ -143,7 +143,7 @@ class ConsumerTest(unittest.TestCase):
         manifest = self.thin_manifest()
         _, expected = consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "thin")
         with zipfile.ZipFile(self.ivy / "jars/other.group_bad.jar", "w") as archive:
-            archive.writestr("native/milvus/1/linux-x86_64/manifest.properties", "format.version=1")
+            archive.writestr("native/milvus/2/linux-x86_64/manifest.properties", "format.version=2")
         with self.assertRaisesRegex(RuntimeError, "Resolved native platforms"):
             consumer.check_resolved(self.ivy, expected)
 

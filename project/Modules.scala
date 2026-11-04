@@ -68,13 +68,13 @@ object Modules {
     )
   ) ++ noSparkImports
 
-  /** Knowhere's layer-1 module is plain Java, so its artifact carries no Scala
-    * suffix. Storage compiles upstream Scala sources for each shared Scala
-    * line.
+  /** The native runtime is plain Java, so its artifact carries no Scala suffix.
+    * Storage compiles upstream Scala sources for each shared Scala line.
     */
   val javaOnly: Seq[Setting[_]] = Seq(
     crossPaths := false,
     autoScalaLibrary := false,
+    Compile / doc / javacOptions += "-notimestamp",
     javacOptions ++= Seq("--release", Versions.sharedJavaRelease)
   )
 
@@ -132,6 +132,44 @@ object Modules {
       "com.fasterxml.jackson.core" % "jackson-annotations" % Versions.jackson,
       "com.fasterxml.jackson.datatype" % "jackson-datatype-jsr310" % Versions.jackson
     )
+  )
+
+  /** Backfill calculations consume inputs and snapshots without service
+    * clients.
+    */
+  val backfillBoundary: Seq[Setting[_]] = Seq(
+    Compile / compile := {
+      val forbidden = Seq(
+        "com.zilliz.milvus.client",
+        "com.zilliz.milvus.offline",
+        "io.milvus.v2",
+        "io.milvus.client",
+        "io.grpc",
+        "io.milvus.grpc.milvus"
+      )
+      val violations = (Compile / unmanagedSources).value.flatMap { source =>
+        val text = IO
+          .read(source)
+          .replaceAll("(?s)/\\*.*?\\*/", "")
+          .replaceAll("(?m)//.*$", "")
+        forbidden
+          .filter(text.contains)
+          .map(reference => s"$source references $reference")
+      }
+      require(
+        violations.isEmpty,
+        "Backfill service boundary violation: " + violations.mkString("; ")
+      )
+      val dependencies = update.value.allModules
+      require(
+        !dependencies.exists(module =>
+          module.organization == "io.grpc" ||
+            (module.organization == "io.milvus" && module.name == "milvus-sdk-java")
+        ),
+        "Backfill must not depend on a Milvus service transport or SDK"
+      )
+      (Compile / compile).value
+    }
   )
 
   /** Test JVM settings for Arrow access and the selected native libraries. */

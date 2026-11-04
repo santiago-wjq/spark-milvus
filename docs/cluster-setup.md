@@ -43,20 +43,13 @@ before exposing it to other users.
 | Native extraction | The process UID must be able to create directories, files and hard links under `java.io.tmpdir`, with enough disk space for extracted libraries. The filesystem must allow shared-library mappings; a `noexec` temporary mount can prevent JNI loading. Configure a different directory before JVM startup if needed. |
 | Spark working space | Provide writable local space for shuffle, spill and downloaded dependencies. On Kubernetes with a read-only root filesystem, mount writable volumes for `/tmp` and Spark's local directories. These are local runtime writes, not snapshot writes. |
 | Signal chaining | Before each JVM starts, preload that JVM's JRE library: `LD_PRELOAD=/path/to/its/jdk/lib/libjsig.so`. Configure the remote driver's environment too; exporting on the submit host only affects a client-mode driver. |
-| Session integration | Set `spark.sql.extensions=com.zilliz.spark.connector.extensions.MilvusReadSparkSessionExtensions` and `spark.plugins=com.zilliz.spark.connector.extensions.MilvusSparkPlugin` before creating Spark. Preserve any other extensions/plugins the deployment requires. |
-| Heap and native memory | Size executor heap **and** container memory overhead. Arrow, Knowhere, Python and other native allocations are outside the JVM heap. Set `spark.executor.memoryOverhead` explicitly on Kubernetes/YARN; standalone hosts need physical RAM beyond the advertised executor heap. |
+| Session integration | The public reader requires no Spark extension or plugin. |
+| Heap and native memory | Size executor heap **and** container memory overhead. Arrow, Storage, Python and other native allocations are outside the JVM heap. Set `spark.executor.memoryOverhead` explicitly on Kubernetes/YARN; standalone hosts need physical RAM beyond the advertised executor heap. |
 
 The native loader's local extraction behavior is implemented in
 [NativeLibraries](../native/runtime/src/main/java/com/zilliz/milvus/jni/runtime/NativeLibraries.java).
-See the [runtime launch requirements](releasing.md#thin-modules-for-downstream-libraries)
-and [search resource configuration](reference.md#vector-search).
-
-For persisted-index search from object storage on glibc systems, include the
-three executor `MALLOC_*` settings in the Kubernetes example below; the
-[search reference](reference.md#vector-search) explains their purpose.
-Keep dynamic allocation disabled for the connector's automatic APPROX task
-resource assignment. If enabling it, follow the reference's `spark.task.cpus`
-requirements. Increasing `-Xmx` alone does not budget native memory.
+See the [artifact and runtime contract](releasing.md#artifact-graph).
+Increasing JVM heap alone does not budget native memory.
 
 ## Grant read access to the whole snapshot
 
@@ -178,8 +171,8 @@ Once the cluster is available, a submitter can run either demo language:
 ```bash
 MASTER=spark://spark-master.internal:7077 ./demo/run.sh python 01_read_snapshot.py \
   --options /private/read-options.json
-MASTER=spark://spark-master.internal:7077 ./demo/run.sh java ExactSearch \
-  --options /private/read-options.json --queries /private/queries.json
+MASTER=spark://spark-master.internal:7077 ./demo/run.sh java FilterProject \
+  --options /private/read-options.json
 ```
 
 The launcher always selects **client** deploy mode. The submit host remains the
@@ -208,28 +201,13 @@ deploy mode does not support Python applications.
 
 ## Use the application image
 
-The published [connector image](../docker/README.md) packages Spark 4.0.1,
-Scala 2.13, Java 21, Python, the connector assembly and both languages' example
-programs. The 2.0.0 tag supports Linux amd64 and arm64:
+Build the [connector image](../docker/README.md) from the current Storage-only
+assembly. Select the same Linux architecture for the assembly, image and nodes:
 
 ```bash
-docker pull milvusdb/spark-milvus:2.0.0-spark4.0
-docker run --rm milvusdb/spark-milvus:2.0.0-spark4.0 \
-  /opt/spark-milvus/demo/run.sh python 01_read_snapshot.py
-```
-
-This local example reads the bundled fixture. For custom builds, build the
-matching native bundle and `spark/assembly` first, following the
-[demo runtime instructions](../demo/README.md#prepare-the-runtime), or download
-the matching Linux assembly from the
-[2.0.0 release](https://github.com/zilliztech/spark-milvus/releases/tag/v2.0.0).
-Then package that assembly; replace the JAR and registry below with your own:
-
-```bash
-export CONNECTOR_JAR="/absolute/path/to/spark-milvus-4.0-bundle-2.0.0-linux-x86_64.jar"
 ./docker/build.sh \
-  --assembly "$CONNECTOR_JAR" \
-  --image registry.example.com/spark-milvus-demo:4.0.1-jdk21-amd64 \
+  --assembly /absolute/path/to/connector-assembly.jar \
+  --image registry.example.com/spark-milvus-demo:current-amd64 \
   --platform linux/amd64
 ```
 
@@ -261,9 +239,8 @@ The chart creates a submission Job, pod-template ConfigMap, three
 ServiceAccounts and namespace-scoped RBAC. The Job runs the image's
 `spark-submit` against the in-cluster Kubernetes API in **cluster** deploy mode.
 Spark creates the driver Pod and supporting resources; the driver creates
-executor Pods. The chart defaults to the vector-functions example, which
-requires no snapshot or storage credentials. Select a snapshot example and an
-existing input Secret to read real data.
+executor Pods. The chart defaults to the read example and requires an existing
+input Secret containing snapshot options.
 
 ### Operator permissions and runtime accounts
 
@@ -307,20 +284,18 @@ Pods and Spark's added local-storage volumes.
 ### Provide the input and values
 
 Prepare `read-options.json` using the API-returned snapshot location and the
-storage configuration above. Prepare query vectors matching your snapshot's
-dimension. After the operator creates the namespace, create a namespace-local
-Secret containing both JSON files:
+storage configuration above. After the operator creates the namespace, create
+a namespace-local Secret containing the options file:
 
 ```bash
 kubectl -n spark-demo create secret generic milvus-read-options \
-  --from-file=read-options.json=/private/read-options.json \
-  --from-file=queries.json=/private/queries.json
+  --from-file=read-options.json=/private/read-options.json
 ```
 
 The chart references this existing Secret. It does not put its contents in Helm
 values, create it, or require the application's ServiceAccounts to read it
 through the API. Spark mounts it once in the driver at
-`/etc/spark-milvus/input`; options and queries are read there before creating
+`/etc/spark-milvus/input`; options are read there before creating
 Spark. Secret volume mounting is performed by Kubernetes, separately from
 application RBAC. Use a DNS label of at most 56 characters for its name, as
 Spark appends a suffix when naming the volume.
@@ -338,22 +313,21 @@ Save the following as `/private/spark-demo-values.yaml`:
 ```yaml
 image:
   repository: milvusdb/spark-milvus
-  tag: "2.0.0-spark4.0"
+  tag: "current-spark4.0"
   # Prefer digest: sha256:... to pin the image.
 language: python
-example: exact
+example: read
 input:
   existingSecret: milvus-read-options
   optionsKey: read-options.json
-  queriesKey: queries.json
 nodeSelector:
   kubernetes.io/os: linux
   kubernetes.io/arch: amd64
 ```
 
-For Java, set `language: java`; `example: exact` then selects the precompiled
+For Java, set `language: java`; `example: read` then selects the precompiled
 `ExactSearch` class. The chart also supports `read`, `filter`, `sql`,
-`filtered`, `index`, `vectors` and `partition`. Use `image.pullSecrets` for a
+`partition`. Use `image.pullSecrets` for a
 private registry. For ARM64, change the node selector; the published tag also
 contains an ARM64 image. For a custom single-platform image, match the image
 platform to the node selector.
@@ -429,11 +403,9 @@ kubectl auth can-i deletecollection configmaps -n spark-demo \
 ```
 
 Then run the read example with the real options file and confirm that executor
-tasks can read the snapshot, not just that the driver starts. Run exact and
-indexed search and check their native metrics; merely starting a Spark session
-or returning search results does not prove that native indexes were used.
-The [demo walkthrough](../demo/README.md) and
-[disposable Milvus procedure](../demo/live-validation.md) provide those checks.
+tasks read and validate the snapshot. The [demo walkthrough](../demo/README.md)
+provides these checks. Backfill additionally needs write access to its declared
+output location; see [offline backfill](backfill.md).
 
 | Symptom | Check first |
 |---|---|
@@ -443,7 +415,7 @@ The [demo walkthrough](../demo/README.md) and
 | Driver reads metadata but executor receives storage `403` | Executor's own IAM/provider setup and permission for the referenced data, delete and index prefixes. |
 | Native extraction/load failure | Writable temporary directory, hard-link support, executable shared-library mappings, matching OS/CPU bundle, JRE `libjsig` and one connector copy per JVM. |
 | Tasks cannot connect to the driver or storage | Advertised addresses, DNS, CA trust, RPC/shuffle firewall rules and NetworkPolicy. |
-| Container OOM with free JVM heap | Native/Python memory and executor overhead, index allocator settings, actual segment/index sizes and search budgets. |
+| Container OOM with free JVM heap | Native/Python memory and executor overhead, actual segment sizes and task concurrency. |
 | Options file missing in cluster mode | Its path in the driver container, Secret mount or dependency localization, not the submit host's filesystem. |
 
 The Helm chart is a deployment template for the documented Spark version and

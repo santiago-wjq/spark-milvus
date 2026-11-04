@@ -10,33 +10,9 @@ from unittest.mock import patch
 
 import jvm_load
 import platforms
-from build import (knowhere_c_api_tests, cardinal_versions, digest, macos_openmp_redirect, platform_tool_requirements,
+from build import (digest, macos_openmp_redirect, platform_tool_requirements,
                    prepare_conan_lock, promote_bundle, replace_requires_section, snapshot_corrosion, validate_conan_lock,
                    validate_locked_graph)
-
-
-class CardinalVersionTest(unittest.TestCase):
-    def write(self, root, generation, body):
-        path = root / "cmake" / "libs" / "cardinal" / generation / "CMakeLists.txt"
-        path.parent.mkdir(parents=True)
-        path.write_text(body)
-
-    def test_tags_come_from_the_knowhere_cmake_files(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            self.write(root, "v1", "# comment\nset(CARDINAL_VERSION v2.5.112)\nset(CARDINAL_REPO_URL \"x\")\n")
-            self.write(root, "v2", "set(CARDINAL_VERSION v3.0.8)\n")
-            self.assertEqual(cardinal_versions(root), {"v1": "v2.5.112", "v2": "v3.0.8"})
-
-    def test_a_missing_or_ambiguous_version_file_fails(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            self.write(root, "v1", "set(CARDINAL_VERSION v2.5.112)\n")
-            with self.assertRaisesRegex(RuntimeError, "no Cardinal version file"):
-                cardinal_versions(root)
-            self.write(root, "v2", "set(CARDINAL_VERSION a)\nset(CARDINAL_VERSION b)\n")
-            with self.assertRaisesRegex(RuntimeError, "exactly one"):
-                cardinal_versions(root)
 
 
 #: The JNI entries this platform names, so fixtures match what promotion checks.
@@ -79,11 +55,9 @@ class BundlePromotionTest(unittest.TestCase):
     def candidate(self, name, **changes):
         path = self.work / "bundle-candidates" / name
         path.mkdir(parents=True)
-        record = {"audit": "passed", "knowhereCApiTestsExit": 0,
-                  "knowhereCApiTests": knowhere_c_api_tests(platforms.host()), "auditPolicy": "jvm-load",
+        record = {"audit": "passed", "componentTests": [], "loadEntries": list(ENTRIES), "auditPolicy": "jvm-load",
                   "jvmLoadTests": [
                       {"entries": list(ENTRIES), "exit": 0},
-                      {"entries": list(ENTRIES[::-1]), "exit": 0},
                   ]}
         record.update(changes)
         (path / "provenance.json").write_text(json.dumps(record))
@@ -98,15 +72,14 @@ class BundlePromotionTest(unittest.TestCase):
 
     def test_failed_tests_or_audit_preserve_previous_bundle_and_candidate(self):
         promote_bundle(self.candidate("good"), self.work)
-        for name, changes in (("failed-tests", {"knowhereCApiTestsExit": 1}),
+        for name, changes in (("failed-tests", {"componentTests": [{"exit": 1}]}),
                               ("failed-audit", {"audit": "pending"}),
                               ("old-audit-policy", {"auditPolicy": "standalone"}),
                               ("missing-jvm-loads", {"jvmLoadTests": []}),
                               ("failed-jvm-load", {"jvmLoadTests": [
                                   {"entries": list(ENTRIES), "exit": 1},
-                                  {"entries": list(ENTRIES[::-1]), "exit": 0},
-                              ]}),
-                              ("missing-test", {"knowhereCApiTests": ["knowhere_c_api"]})):
+                                          ]}),
+                              ("duplicate-load", {"jvmLoadTests": [{"entries": list(ENTRIES), "exit": 0}] * 2})):
             with self.subTest(name=name):
                 candidate = self.candidate(name, **changes)
                 with self.assertRaisesRegex(ValueError, "not passed"):

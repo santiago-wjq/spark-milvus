@@ -36,10 +36,14 @@ class ReleaseTest(unittest.TestCase):
         self.output = self.root / "candidate"
         self.plan = json.loads(release.MATRIX.read_text())
         self.plan["jvm"] = RELEASE_ROWS
+        self.plan["thin"] = [{"line": "4.0", "scala": "2.13.16", "spark": "4.0.0", "product": "backfill"}]
         self.build_matrix = self.root / "build-matrix.json"
-        release.write_json(self.build_matrix, {"schemaVersion": 1, "release": RELEASE_ROWS})
+        release.write_json(self.build_matrix, {"schemaVersion": 1, "release": RELEASE_ROWS, "spark": [
+            {"line": line, "scala": scala, "spark": line + ".0"}
+            for line, scala in (("3.5", "2.12.20"), ("3.5", "2.13.16"), ("4.0", "2.13.16"),
+                                ("4.1", "2.13.16"), ("4.2", "2.13.16"))]})
         self.plan.update(version="2.0.0-rc.1", sourceSha="a" * 40,
-                         pins={"milvus-storage": "b" * 40, "knowhere": "c" * 40, "milvus-proto": "d" * 40})
+                         pins={"milvus-storage": "b" * 40, "milvus-proto": "d" * 40})
         self.plan_path = self.root / "plan.json"
         release.write_json(self.plan_path, self.plan)
         for native in self.plan["native"]:
@@ -59,13 +63,13 @@ class ReleaseTest(unittest.TestCase):
         path = self.inputs / platform / f"milvus-native-{platform}.jar"
         provenance = json.dumps({"audit": "passed", "auditPolicy": "jvm-load"}).encode()
         manifest = {
-            "format.version": "1", "platform": platform, "with_cardinal": "false",
+            "format.version": "2", "platform": platform, "components": "storage",
             "storage.revision": storage or self.plan["pins"]["milvus-storage"],
-            "knowhere.revision": self.plan["pins"]["knowhere"], "libraries": library,
+            "libraries": library,
             "sha256." + library: hashlib.sha256(b"native test payload").hexdigest(),
             "provenance.sha256": hashlib.sha256(provenance).hexdigest(),
         }
-        prefix = f"native/milvus/1/{platform}/"
+        prefix = f"native/milvus/2/{platform}/"
         self.jar(path, {prefix + library: b"native test payload",
                         prefix + "manifest.properties": "".join(f"{key}={value}\n" for key, value in manifest.items()),
                         "META-INF/milvus-native/provenance.json": provenance,
@@ -90,12 +94,12 @@ class ReleaseTest(unittest.TestCase):
                 contents.update({name: "source fixture" for names in release.THIN_SOURCES.values() for name in names})
             if not classifier:
                 contents.update({
-                    "io/milvus/storage/Api.class": b"class fixture",
-                    "com/zilliz/spark/connector/Api.class": b"class fixture",
-                    release.COMPATIBILITY: "format.version=1\nstorage.revision=" + "b" * 40 + "\nknowhere.revision=" + "c" * 40 + "\n",
+                                        "com/zilliz/spark/connector/Api.class": b"class fixture",
+                    release.REQUIREMENTS: "format.version=2\nrevision=" + "b" * 40 + "\nentry=milvus-storage-jni\n",
+                    release.REQUIREMENTS_LIST: "storage\n",
                 })
                 if not omit_api:
-                    contents["io/knowhere/Api.class"] = b"class fixture"
+                    contents["io/milvus/storage/Api.class"] = b"class fixture"
             self.jar(path, contents)
             records.append(dict(classifier=classifier, path=path.name, extension="jar", sha256=release.digest(path)))
         release.write_json(directory / "artifact.json", dict(
@@ -111,11 +115,11 @@ class ReleaseTest(unittest.TestCase):
         directory = self.inputs / "thin-4.0"
         modules = []
         line = next(item for item in self.plan["jvm"] if item["line"] == "4.0")
-        for artifact, (project, internal) in release.THIN_MODULES.items():
+        for artifact, (project, internal) in release.thin_graph("4.0", "2.13", "backfill").items():
             runtime = [dict(groupId="com.zilliz", artifactId=name, version=self.plan["version"])
                        for name in internal]
             provided = [dict(groupId="org.apache.spark", artifactId="spark-" + name + "_2.13", version=spark_build_version)
-                        for name in ("core", "sql", "catalyst")] if project == "spark" else []
+                        for name in ("core", "sql", "catalyst")] if project in {"spark", "backfill"} else []
             files = []
             for classifier, extension in sorted(release.MAVEN_FILES):
                 suffix = "-" + classifier if classifier else ""
@@ -128,18 +132,16 @@ class ReleaseTest(unittest.TestCase):
                     contents = {"README.md": "fixture"} if classifier else {f"fixture/{project}/Api.class": b"fixture"}
                     if classifier == "sources":
                         contents.update({name: "source fixture" for name in release.THIN_SOURCES[project]})
-                    if project == "native-runtime" and not classifier:
-                        contents[release.COMPATIBILITY] = "format.version=1\nstorage.revision=" + "b" * 40 + \
-                            "\nknowhere.revision=" + "c" * 40 + "\n"
-                    if project == "native-vector" and not classifier:
-                        contents["io/knowhere/Knowhere.class"] = b"fixture"
+                    if project == "native-storage" and not classifier:
+                        contents[release.REQUIREMENTS] = "format.version=2\nrevision=" + "b" * 40 + "\nentry=milvus-storage-jni\n"
+                        contents[release.REQUIREMENTS_LIST] = "storage\n"
                     self.jar(path, contents)
                 files.append(dict(classifier=classifier, extension=extension,
                     path=str(path.relative_to(directory)), sha256=release.digest(path), size=path.stat().st_size))
             modules.append(dict(artifactId=artifact, projectId=project, javaRelease=17, files=files,
                                 runtimeDependencies=runtime, providedDependencies=provided))
         release.write_json(directory / "thin-artifacts.json", dict(
-            schemaVersion=1, kind="thin", groupId="com.zilliz", version=self.plan["version"],
+            schemaVersion=1, kind="thin", product="backfill", groupId="com.zilliz", version=self.plan["version"],
             sourceSha=self.plan["sourceSha"], sparkLine="4.0", sparkVersion=spark_build_version,
             scalaVersion=line["scala"], scalaBinaryVersion="2.13", modules=modules))
 
@@ -225,6 +227,36 @@ class ReleaseTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Thin-only plan"):
             release.validate_plan(invalid)
 
+    def add_reader_export(self):
+        source = self.inputs / "thin-4.0"
+        destination = self.inputs / "reader-4.0"
+        shutil.copytree(source, destination)
+        metadata = json.loads((destination / "thin-artifacts.json").read_text())
+        metadata["product"] = "reader"
+        metadata["modules"] = [module for module in metadata["modules"] if module["projectId"] != "backfill"]
+        shutil.rmtree(destination / "spark-milvus-backfill-4.0_2.13")
+        release.write_json(destination / "thin-artifacts.json", metadata)
+        self.plan["thin"].append(dict(self.plan["thin"][0], product="reader"))
+        release.write_json(self.plan_path, self.plan)
+        return destination, metadata
+
+    def test_reader_and_backfill_share_one_identical_gav(self):
+        self.add_reader_export()
+        manifest = self.stage()
+        self.assertEqual(len([item for item in manifest["artifacts"] if item["kind"] == "thin"]), 20)
+        self.assertEqual({item["product"] for item in manifest["thin"]}, {"reader", "backfill"})
+
+    def test_rehashing_a_shared_product_does_not_allow_conflicting_bytes(self):
+        directory, metadata = self.add_reader_export()
+        module = next(item for item in metadata["modules"] if item["projectId"] == "core")
+        record = next(item for item in module["files"] if item["classifier"] == "" and item["extension"] == "jar")
+        path = directory / record["path"]
+        self.jar(path, {"fixture/core/Api.class": b"changed public core"})
+        record.update(sha256=release.digest(path), size=path.stat().st_size)
+        release.write_json(directory / "thin-artifacts.json", metadata)
+        with self.assertRaisesRegex(ValueError, "Shared thin GAV has different bytes"):
+            self.stage()
+
     def test_duplicate_thin_gav_is_rejected(self):
         path = self.inputs / "thin-4.0" / "thin-artifacts.json"
         data = json.loads(path.read_text())
@@ -237,16 +269,23 @@ class ReleaseTest(unittest.TestCase):
         for version in ("4.0.2", "4.1.0", "4.0.0-SNAPSHOT", "[4.0.0,)", "4.0.01", "4.0"):
             with self.subTest(version=version):
                 self.thin(spark_build_version=version)
-                with self.assertRaisesRegex(ValueError, "build version must match the line"):
+                with self.assertRaisesRegex(ValueError, "build version must match the source matrix"):
                     self.stage()
 
     def test_thin_spark_pom_must_match_exact_build_version(self):
         path = self.inputs / "thin-4.0" / "thin-artifacts.json"
         data = json.loads(path.read_text())
-        # Both patch releases are valid consumer targets, but the POM must
-        # describe the release actually used to compile this candidate.
-        data["sparkVersion"] = "4.0.1"
+        # Keep the metadata and POM consistent with each other but different from the compile version.
+        spark = next(module for module in data["modules"] if module["projectId"] == "spark")
+        for dependency in spark["providedDependencies"]:
+            dependency["version"] = "4.0.1"
         release.write_json(path, data)
+        def change_version(pom):
+            ns = "{http://maven.apache.org/POM/4.0.0}"
+            for dep in pom.find(ns + "dependencies"):
+                if dep.findtext(ns + "groupId") == "org.apache.spark":
+                    dep.find(ns + "version").text = "4.0.1"
+        self.rewrite_thin_export("spark-milvus-4.0-thin_2.13", lambda path: self.modify_pom(path, change_version))
         with self.assertRaisesRegex(ValueError, "provided Spark build version"):
             self.stage()
 
@@ -276,7 +315,7 @@ class ReleaseTest(unittest.TestCase):
     def test_thin_pom_cannot_drop_provided_dependency(self):
         artifact = "spark-milvus-4.0-thin_2.13"
         dependencies = [dict(groupId="com.zilliz", artifactId=name, version=self.plan["version"])
-                        for name in release.THIN_MODULES[artifact][1]]
+                        for name in release.thin_graph("4.0", "2.13", "backfill")[artifact][1]]
         self.rewrite_thin_export(artifact, lambda path: path.write_bytes(release.pom_bytes(artifact, self.plan, dependencies)))
         with self.assertRaisesRegex(ValueError, "differ from build metadata"):
             self.stage()
@@ -290,7 +329,7 @@ class ReleaseTest(unittest.TestCase):
 
     def test_thin_jar_cannot_embed_native_or_sdk(self):
         artifact = "spark-milvus-core_2.13"
-        for name, expected in (("native/milvus/1/linux-x86_64/libtest.so", "platform bundle"),
+        for name, expected in (("native/milvus/2/linux-x86_64/libtest.so", "platform bundle"),
                                ("io/milvus/v2/client/MilvusClientV2.class", "official Milvus SDK")):
             with self.subTest(name=name):
                 self.thin()
@@ -305,10 +344,10 @@ class ReleaseTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Duplicate thin class"):
             self.stage()
 
-    def test_thin_vector_requires_upstream_java_api(self):
-        self.rewrite_thin_export("spark-milvus-native-vector", lambda path: self.jar(path, {
-            "fixture/native-vector/Api.class": "fixture"}), extension="jar")
-        with self.assertRaisesRegex(ValueError, "missing the Knowhere Java API"):
+    def test_thin_reader_rejects_search_classes(self):
+        self.rewrite_thin_export("spark-milvus-core_2.13",
+            lambda path: self.jar(path, {"io/knowhere/Knowhere.class": b"fixture"}), extension="jar")
+        with self.assertRaisesRegex(ValueError, "vector search"):
             self.stage()
 
     def test_candidate_rechecks_thin_pom_graph_after_rehash(self):
@@ -659,11 +698,13 @@ class ReleaseTest(unittest.TestCase):
         self.assertEqual(len(plan["consumer"]), 12)
         self.assertEqual({row["os_version"] for row in plan["consumer"]},
                          {"ubuntu-22.04", "ubuntu-24.04", "macos-14", "macos-15"})
-        self.assertEqual(set(plan["pins"]), {"milvus-proto", "milvus-storage", "knowhere"})
+        self.assertEqual(set(plan["pins"]), {"milvus-proto", "milvus-storage"})
 
     def test_release_plan_takes_versions_from_the_exported_matrix(self):
         rows = [dict(row, spark="4.0.2") if row["line"] == "4.0" else row for row in RELEASE_ROWS]
-        release.write_json(self.build_matrix, {"schemaVersion": 1, "release": rows})
+        matrix = json.loads(self.build_matrix.read_text())
+        matrix["release"] = rows
+        release.write_json(self.build_matrix, matrix)
         output = self.root / "exported-plan.json"
         release.create_plan("2.0.0-rc.1", output, self.build_matrix)
         self.assertEqual(json.loads(output.read_text())["jvm"], rows)
@@ -681,9 +722,9 @@ class ReleaseTest(unittest.TestCase):
             with self.subTest(message=message):
                 self.jar(path, contents)
                 with self.assertRaisesRegex(ValueError, message):
-                    release.verify_sources(path, "thin", artifact)
+                    release.verify_sources(path, "thin", artifact, release.thin_inventory(self.plan))
         self.jar(path, sources)
-        release.verify_sources(path, "thin", artifact)
+        release.verify_sources(path, "thin", artifact, release.thin_inventory(self.plan))
 
     def test_candidate_rejects_placeholder_sources_even_with_updated_hashes(self):
         self.rewrite_thin_export("spark-milvus-core_2.13",
@@ -697,10 +738,10 @@ class ReleaseTest(unittest.TestCase):
         own = "com/zilliz/milvus/jni/storage/NativeStorageLibrary.java"
         upstream = "milvus-storage/scala/io/milvus/storage/MilvusStorageReader.scala"
         self.jar(path, {own: "source", upstream: "upstream source"})
-        release.verify_sources(path, "thin", "spark-milvus-native-storage_2.13")
+        release.verify_sources(path, "thin", "spark-milvus-native-storage_2.13", release.thin_inventory(self.plan))
         self.jar(path, {own: "source", "io/milvus/storage/MilvusStorageReader.scala": "wrong mapping"})
         with self.assertRaisesRegex(ValueError, "missing API sources"):
-            release.verify_sources(path, "thin", "spark-milvus-native-storage_2.13")
+            release.verify_sources(path, "thin", "spark-milvus-native-storage_2.13", release.thin_inventory(self.plan))
 
 
 class SigningKeyTest(unittest.TestCase):

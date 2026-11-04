@@ -10,11 +10,11 @@ import sbt._
 import sbt.Keys._
 
 /** Exports the existing module graph as independently consumable JVM artifacts.
-  * Only read/search modules belong in the public candidate.
+  * Reader and optional offline backfill have explicit dependency closures.
   */
 object ThinArtifacts {
   val releaseThinArtifacts = taskKey[Seq[File]](
-    "Export Spark 4.0 thin module JARs, sources, documentation, POMs and metadata"
+    "Export selected thin module JARs, sources, documentation, POMs and metadata"
   )
   val thinModule = taskKey[Module]("Collect one module's thin release inputs")
 
@@ -47,8 +47,13 @@ object ThinArtifacts {
     )
   )
 
-  def outputDirectory(root: File): File =
-    root / "target" / "release-thin" / "4.0"
+  def outputDirectory(
+      root: File,
+      line: String,
+      scalaBinary: String,
+      product: String
+  ): File =
+    root / "target" / "release-thin" / line / scalaBinary / product
 
   def export(
       root: File,
@@ -57,7 +62,6 @@ object ThinArtifacts {
       scalaBinary: String,
       modules: Seq[Module],
       resolvedClasspath: Classpath,
-      knowhereApi: File,
       jdk: File,
       log: Logger
   ): Seq[File] = {
@@ -68,24 +72,21 @@ object ThinArtifacts {
       sourceSha.matches("[a-f0-9]{40}"),
       "Thin release source must have an exact Git commit"
     )
+    val product =
+      if (modules.exists(_.projectId == "backfill")) "backfill" else "reader"
     require(
-      line.id == "4.0" && scalaBinary == "2.13",
-      "Thin releases currently support Spark 4.0 / Scala 2.13"
+      product != "backfill" || (line.id == "4.0" && scalaBinary == "2.13"),
+      "Backfill releases support Spark 4.0 / Scala 2.13"
     )
-    val expected = Set(
-      "native-runtime",
-      "native-storage",
-      "native-vector",
-      "core",
-      "spark"
-    )
+    val expected = Set("native-runtime", "native-storage", "core", "spark") ++
+      (if (product == "backfill") Set("backfill") else Set.empty[String])
     require(
       modules
         .map(_.projectId)
         .toSet == expected && modules.size == expected.size,
-      "The thin candidate must include the complete five-module closure"
+      s"The $product candidate must include its complete module closure"
     )
-    val destination = outputDirectory(root)
+    val destination = outputDirectory(root, line.id, scalaBinary, product)
     IO.createDirectory(destination)
     val work = destination / "export-work"
     IO.delete(work)
@@ -128,12 +129,6 @@ object ThinArtifacts {
       val stem = s"$artifact-$version"
       val moduleWork = work / module.projectId
       val binaryInputs = unpack(module.binary, moduleWork / "binary")
-      val apiInputs =
-        if (module.projectId == "native-vector")
-          unpack(knowhereApi, moduleWork / "knowhere-api").filterNot(
-            _._2 == "META-INF/MANIFEST.MF"
-          )
-        else Seq.empty
       val manifestFile = moduleWork / "binary" / "META-INF" / "MANIFEST.MF"
       val input = new FileInputStream(manifestFile)
       val manifest =
@@ -151,16 +146,12 @@ object ThinArtifacts {
       try manifest.write(manifestOutput)
       finally manifestOutput.close()
       val binary = directory / s"$stem.jar"
-      ReleaseArtifacts.archive(binaryInputs ++ apiInputs, binary)
+      ReleaseArtifacts.archive(binaryInputs, binary)
       verifyBinary(binary, module.projectId)
 
       val sources = directory / s"$stem-sources.jar"
-      val upstreamSources =
-        if (module.projectId == "native-vector")
-          ReleaseArtifacts.upstreamSources(root)
-        else Seq.empty
       ReleaseArtifacts.archive(
-        unpack(module.sources, moduleWork / "sources") ++ upstreamSources,
+        unpack(module.sources, moduleWork / "sources"),
         sources
       )
       val documentation = directory / s"$stem-javadoc.jar"
@@ -168,26 +159,7 @@ object ThinArtifacts {
         (module.documentation / "index.html").isFile,
         s"Missing API documentation: ${module.projectId}"
       )
-      if (module.projectId == "native-vector") {
-        val knowhereDocs = ReleaseArtifacts.upstreamDocumentation(
-          root,
-          jdk,
-          moduleWork / "knowhere-doc"
-        )
-        val index = moduleWork / "index.html"
-        IO.write(
-          index,
-          "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Native vector API</title><h1>Native vector API</h1><ul><li><a href=\"api/native-vector/index.html\">Connector adapters</a></li><li><a href=\"api/knowhere/index.html\">Knowhere Java API</a></li></ul></html>"
-        )
-        ReleaseArtifacts.archive(
-          files(module.documentation, "api/native-vector/") ++ files(
-            knowhereDocs,
-            "api/knowhere/"
-          ) :+ (index -> "index.html"),
-          documentation
-        )
-      } else
-        ReleaseArtifacts.archive(files(module.documentation), documentation)
+      ReleaseArtifacts.archive(files(module.documentation), documentation)
 
       val pom = rewritePom(
         poms(module.projectId),
@@ -272,6 +244,7 @@ object ThinArtifacts {
       Map(
         "schemaVersion" -> 1,
         "kind" -> "thin",
+        "product" -> product,
         "groupId" -> "com.zilliz",
         "version" -> version,
         "sourceSha" -> sourceSha,
@@ -285,7 +258,7 @@ object ThinArtifacts {
     val metadataFile = destination / "thin-artifacts.json"
     IO.write(metadataFile, metadata.toString() + "\n", StandardCharsets.UTF_8)
     IO.delete(work)
-    log.info(s"Exported read-only thin release candidate: $destination")
+    log.info(s"Exported $product thin release candidate: $destination")
     exported.flatMap(_._2) :+ metadataFile
   }
 
@@ -299,7 +272,7 @@ object ThinArtifacts {
       projectId: String,
       sourceSha: String
   ): Elem = {
-    val sparkModule = projectId == "spark"
+    val sparkModule = projectId == "spark" || projectId == "backfill"
     val dependencies = (original \ "dependencies" \ "dependency")
       .collect {
         // sbt writes `provided,test` dependencies as test in makePom. Retain
@@ -322,12 +295,20 @@ object ThinArtifacts {
                 )
               )
             case None =>
-              val selected = resolved.getOrElse(
-                identity,
-                sys.error(
-                  s"Thin POM dependency is not on the resolved classpath: $identity"
-                )
-              )
+              val selected =
+                if (!sparkModule)
+                  ModuleID(
+                    identity._1,
+                    identity._2,
+                    (dependency \ "version").text
+                  )
+                else
+                  resolved.getOrElse(
+                    identity,
+                    sys.error(
+                      s"Thin POM dependency is not on the resolved classpath: $identity"
+                    )
+                  )
               val declaredScope = (dependency \ "scope").text
               // Lower modules keep their standalone library dependencies. Only
               // the Spark surface can rely on its distribution to provide them.
@@ -343,7 +324,11 @@ object ThinArtifacts {
                 else "compile"
               fields(
                 dependency,
-                Map("version" -> selected.revision, "scope" -> scope)
+                Map(
+                  "version" -> (if (sparkModule) selected.revision
+                                else (dependency \ "version").text),
+                  "scope" -> scope
+                )
               )
           }
       }
@@ -408,15 +393,15 @@ object ThinArtifacts {
         "Shared native loader and source compatibility checks."
       case "native-storage" =>
         "Milvus Storage JVM bindings for segment file access."
-      case "native-vector" =>
-        "Knowhere Java bindings and vector search/index adapters."
       case "core" =>
-        "Milvus V3 schemas, storage formats and read/search computation."
+        "Milvus V3 schemas, storage formats and read/write primitives."
       case "spark" =>
-        "Spark 4.0 read-only DataSource and vector search interfaces."
+        "Spark snapshot DataSource and Arrow write interfaces."
+      case "backfill" =>
+        "Offline field backfill over existing snapshots and inputs."
       case other => sys.error(s"Unknown thin module: $other")
     }
-    s"Read-only Spark Milvus thin module. $purpose"
+    s"Spark Milvus thin module. $purpose"
   }
 
   private def fields(element: Elem, replacements: Map[String, String]): Elem = {
@@ -471,15 +456,10 @@ object ThinArtifacts {
         forbidden.isEmpty,
         s"Thin JAR contains native or Spark resources: ${forbidden.toSeq.sorted.mkString(", ")}"
       )
-      if (projectId == "native-vector")
+      if (projectId == "native-storage")
         require(
-          names("io/knowhere/Knowhere.class"),
-          "Thin native-vector JAR must contain the Knowhere Java API"
-        )
-      if (projectId == "native-runtime")
-        require(
-          names("META-INF/milvus-native/compatibility.properties"),
-          "Thin native-runtime JAR must preserve source compatibility metadata"
+          names("META-INF/milvus-native/requirements/storage.properties"),
+          "Thin native-storage JAR must preserve its component contract"
         )
     } finally jar.close()
   }
