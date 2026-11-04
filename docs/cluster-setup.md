@@ -16,8 +16,8 @@ the existing snapshot directly from object storage.
 |---|---|
 | Infrastructure operator | Provision nodes or the managed Spark service, networking, images and resource quotas. On Kubernetes, prepare the namespace, ServiceAccounts, RBAC and any Secrets or volumes. These setup permissions belong to the operator. |
 | Job submitter | Submit to the chosen Spark master or YARN queue; on Kubernetes, authenticate to the API and create and monitor the driver and its supporting resources in the application namespace. |
-| Spark driver | Read snapshot metadata and referenced manifests; start and monitor executors through the cluster manager; read the demo's options and query JSON. |
-| Spark executors | Read the referenced data, delete, index and auxiliary files. Each executor opens its own native storage session and needs its own usable storage identity. |
+| Spark driver | Read snapshot metadata and referenced manifests; start and monitor executors through the cluster manager; read the demo's options JSON. |
+| Spark executors | Read the referenced data, delete and auxiliary files. Each executor opens its own native storage session and needs its own usable storage identity. |
 | Snapshot-path helper | If the optional REST helper is used, access the Milvus endpoint and have `DescribeSnapshot` permission on the collection. Its Milvus token does not grant object-storage access. |
 
 Driver and executor storage principals may differ, but each must be authorized
@@ -60,7 +60,7 @@ API-returned `milvus.snapshot.path` unchanged. `fs.root_path` does not add a
 prefix to bucket-relative object keys.
 
 Grant object reads for the snapshot JSON, snapshot Avro manifests, V3
-`_metadata` manifests, column groups, deletes, indexes and auxiliary files.
+`_metadata` manifests, column groups, deletes and auxiliary files.
 They may occupy different prefixes; granting only `files/snapshots/` is
 insufficient. Listing can also be needed for manifest discovery. This AWS
 example covers an input whose entire referenced object set is under `files/`:
@@ -180,7 +180,7 @@ driver, must stay running and must be reachable from workers. It sends its own
 absolute `JAVA_HOME/lib/libjsig.so` path to executors; that path must exist on
 every worker, or use direct `spark-submit` with each runtime's correct path.
 Use custom options; the checkout's default fixture is deliberately local-only.
-The options and query JSON need to exist on the **driver**; local snapshot/data
+The options JSON needs to exist on the **driver**; local snapshot/data
 paths, native CA files and credential files must exist at the appropriate paths
 on every process that reads them. Java launch also needs write access to
 `demo/target` on the submit host.
@@ -326,7 +326,7 @@ nodeSelector:
 ```
 
 For Java, set `language: java`; `example: read` then selects the precompiled
-`ExactSearch` class. The chart also supports `read`, `filter`, `sql`,
+`ReadSnapshot` class. The chart also supports `read`, `filter`, `sql`,
 `partition`. Use `image.pullSecrets` for a
 private registry. For ARM64, change the node selector; the published tag also
 contains an ARM64 image. For a custom single-platform image, match the image
@@ -337,7 +337,7 @@ complete configuration, including existing accounts and resource sizing.
 The defaults request two executors with 4 GiB heap and 4 GiB overhead each,
 plus a driver with 2 GiB heap and 1 GiB overhead and a separate submission Job.
 These are example budgets, not production sizing. Ensure quotas and nodes can
-satisfy them, then tune for your actual indexes, segment sizes and Python/native
+satisfy them, then tune for your column widths, segment sizes and Python/native
 memory use. Default ServiceAccount names are scoped to each release; fixed
 account names should be provisioned separately and selected with `create=false`
 when sharing them across releases.
