@@ -196,18 +196,15 @@ query wherever Milvus's semantics are the ones that apply.
   `download_milvus_proto.sh` is not run.
 - **The `milvus` submodule is opt-in.** `.gitmodules` sets `update = none`
   and CI initializes submodules by name, so only this build clones Milvus.
-- **The `milvus` gitlink is the head of an open Milvus pull request.** At the
-  previous pin, segcore's chunk managers took a reference to the AWS SDK
+- **The `milvus` gitlink keeps Milvus's fix for the AWS SDK at exit.**
+  Before it, segcore's chunk managers took a reference to the AWS SDK
   (`Aws::InitAPI`) and never released it, which Milvus's Go process, exiting
   without C++ static destructors, never notices. A JVM runs them under
   `System.exit`, so the SDK's static objects were destroyed while it was
   still initialized, and the thread its client bootstrap starts when
   destroyed could crash the JVM in the SDK's log redirection (SIGSEGV).
-  Milvus PR 55131 releases the reference when the process exits. The gitlink
-  is that pull request's head, one commit on top of the Milvus master it was
-  based on; GitHub serves the commit from `milvus-io/milvus` through the pull
-  request, so `.gitmodules` keeps that URL. When the pull request merges, the
-  gitlink moves to the merged commit on master.
+  Milvus PR 55131 releases the reference when the process exits, from master
+  commit eabafc85ad on; a gitlink without that change brings the crash back.
 
 ## Build
 
