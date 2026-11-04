@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build both upstream JNI implementations with one independent CMake project."""
+"""Build Storage and explicit external components in one native dependency graph."""
 import argparse
 import fcntl
 import hashlib
@@ -17,20 +17,17 @@ import jvm_load
 import platforms
 
 
-# The DiskANN acceptance fixture exists where DiskANN does.
-def knowhere_c_api_tests(adapter):
-    names = ["knowhere_c_api", "knowhere_c_api_concurrency"]
-    if adapter.builds_diskann():
-        names.append("knowhere_c_api_diskann_acceptance")
-    return sorted(names)
-
-
 def digest(path):
     value = hashlib.sha256()
     with Path(path).open("rb") as source:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             value.update(block)
     return value.hexdigest()
+
+
+def ctest_pattern(names):
+    """CTest uses its own regex dialect, which has no non-capturing groups."""
+    return "^(" + "|".join(re.escape(name) for name in names) + ")$"
 
 
 def run(command, cwd=None, output=None, env=None):
@@ -44,50 +41,6 @@ def run(command, cwd=None, output=None, env=None):
 
 def git_value(source, *args):
     return subprocess.check_output(["git", "-C", str(source), *args], text=True).strip()
-
-
-# Keyed the way Knowhere names each checkout under thirdparty/ (cardinalv1,
-# cardinalv2), which Cardinal.cmake, Sources.cmake and the license
-# collection in stage.py address by the same name.
-CARDINAL_VERSION_FILES = {"v1": "cmake/libs/cardinal/v1/CMakeLists.txt", "v2": "cmake/libs/cardinal/v2/CMakeLists.txt"}
-
-
-def cardinal_versions(knowhere_source):
-    """Read the Cardinal tag each generation of the pinned Knowhere checkout builds against.
-
-    Knowhere pins Cardinal in its own CMake files as `set(CARDINAL_VERSION <tag>)`.
-    The independent CMake build never executes those files, so the tags are read
-    here and the Knowhere gitlink stays the only place that selects Cardinal.
-    """
-    versions = {}
-    for generation, relative in CARDINAL_VERSION_FILES.items():
-        path = Path(knowhere_source) / relative
-        if not path.is_file():
-            raise RuntimeError("Pinned Knowhere source has no Cardinal version file: " + str(path))
-        found = re.findall(r"^\s*set\(CARDINAL_VERSION\s+([^\s)]+)\)", path.read_text(), re.MULTILINE)
-        if len(found) != 1:
-            raise RuntimeError("Expected exactly one set(CARDINAL_VERSION ...) in " + str(path))
-        versions[generation] = found[0]
-    return versions
-
-
-def cardinal_overrides(values):
-    """Parse `--cardinal-version GEN=REF` options into the refs that replace Knowhere's pins.
-
-    Knowhere's Cardinal pins can lag its own IndexNode API; a downstream build
-    that must pair a newer Cardinal with the pinned Knowhere names the ref (tag
-    or commit) per generation here. The provenance records the override as the
-    tag, so the source identity stays visible.
-    """
-    overrides = {}
-    for value in values or []:
-        generation, separator, ref = value.partition("=")
-        if separator != "=" or generation not in CARDINAL_VERSION_FILES or not re.fullmatch(r"[A-Za-z0-9._/-]+", ref):
-            raise ValueError("--cardinal-version expects v1=<ref> or v2=<ref>, got: " + value)
-        if generation in overrides:
-            raise ValueError("--cardinal-version names " + generation + " twice")
-        overrides[generation] = ref
-    return overrides
 
 
 def clone_ref(source, ref, destination):
@@ -158,16 +111,6 @@ def storage_revision(repository, source, override):
         raise ValueError("An exported storage source requires --storage-revision matching the recorded gitlink")
     return revision
 
-
-def knowhere_source(repository, override):
-    """Return the recorded submodule revision and a checkout that supplies that Git object."""
-    revision, pinned_source = submodule_source(repository, "knowhere", "Knowhere")
-    object_source = (override or pinned_source).resolve()
-    if not object_source.is_dir() or not (object_source / ".git").exists():
-        raise ValueError("--knowhere-source must name a local Git checkout")
-    if git_value(object_source, "rev-parse", "HEAD") != revision:
-        raise ValueError("Knowhere object source HEAD differs from the recorded gitlink")
-    return revision, object_source
 
 
 def check_cmake_trace(path, upstream_sources):
@@ -317,14 +260,14 @@ def snapshot_corrosion(specification, local_source, destination):
 def promote_bundle(candidate, work):
     """Keep both failed candidates and previous successful output for diagnosis."""
     metadata = json.loads((candidate / "provenance.json").read_text())
-    entries = list(jvm_load.JVM_LOAD_ENTRIES)
+    entries = metadata["loadEntries"]
+    expected_orders = [list(order) for order in dict.fromkeys((tuple(entries), tuple(reversed(entries))))]
     orders = metadata.get("jvmLoadTests")
-    jvm_passed = (isinstance(orders, list) and len(orders) == 2
+    jvm_passed = (isinstance(orders, list) and len(orders) == len(expected_orders)
                   and all(isinstance(record, dict) and record.get("entries") == expected
                           and type(record.get("exit")) is int and record["exit"] == 0
-                          for record, expected in zip(orders, (entries, entries[::-1]))))
-    if (metadata.get("audit") != "passed" or metadata.get("knowhereCApiTestsExit") != 0
-            or sorted(metadata.get("knowhereCApiTests", [])) != knowhere_c_api_tests(platforms.host())
+                          for record, expected in zip(orders, expected_orders)))
+    if (metadata.get("audit") != "passed" or any(record["exit"] != 0 for record in metadata.get("componentTests", []))
             or metadata.get("auditPolicy") != "jvm-load" or not jvm_passed):
         raise ValueError("Native candidate has not passed all required validation: " + str(candidate))
     bundle = work / "bundle"
@@ -349,12 +292,8 @@ def main():
     parser.add_argument("--storage-source", type=Path, default=repository / "milvus-storage")
     parser.add_argument("--storage-revision", help="Base revision for an exported, non-Git storage working tree")
     parser.add_argument("--storage-patch", type=Path, help="Git diff for an exported storage working tree")
-    parser.add_argument("--knowhere-source", type=Path,
-                        help="Local Git object source whose HEAD matches the root knowhere submodule")
-    parser.add_argument("--cardinal-repository", help="Authorized Cardinal Git repository or local checkout")
-    parser.add_argument("--with-cardinal", action="store_true")
-    parser.add_argument("--cardinal-version", action="append", metavar="GEN=REF",
-                        help="Replace the Cardinal ref Knowhere pins for generation v1 or v2 (tag or commit)")
+    parser.add_argument("--components", type=Path,
+                        help="External component descriptor; Storage is always built by this driver")
     parser.add_argument("--jobs", type=int, default=8)
     parser.add_argument("--cargo-cache", type=Path, help="Optional existing Cargo target cache, copied before compiling")
     parser.add_argument("--corrosion-source", type=Path, help="Optional local Corrosion v0.5 source cache")
@@ -364,10 +303,6 @@ def main():
     args = parser.parse_args()
     if not 1 <= args.jobs <= 50:
         parser.error("--jobs must be between 1 and 50")
-    try:
-        args.cardinal_overrides = cardinal_overrides(args.cardinal_version)
-    except ValueError as error:
-        parser.error(str(error))
     try:
         target = platforms.host_platform()
     except ValueError as error:
@@ -413,7 +348,20 @@ def build(args, repository, java_home, work, target, profile):
     try:
         phase("snapshot-sources")
         constraints = json.loads((repository / "native/build/dependencies.json").read_text())
-        knowhere_pin, knowhere_object_source = knowhere_source(repository, args.knowhere_source)
+        extension = json.loads(args.components.read_text()) if args.components else {}
+        components = extension.get("components", [])
+        component_names = [component["name"] for component in components]
+        if (len(set(component_names)) != len(component_names) or "storage" in component_names
+                or any(not re.fullmatch(r"[a-z][a-z0-9-]*", name) for name in component_names)):
+            raise ValueError("External components must have distinct names other than storage")
+        constraints["references"].update(extension.get("references", {}))
+        for key, value in extension.get("versionPolicy", {}).items():
+            if isinstance(value, dict):
+                constraints["version_policy"].setdefault(key, {}).update(value)
+            else:
+                constraints["version_policy"][key] = value
+        constraints["platform_scope"].update(extension.get("platformScope", {}))
+        constraints["static_on"].update(extension.get("staticOn", {}))
         storage_pin = storage_revision(repository, args.storage_source, args.storage_revision)
         storage = sources / "milvus-storage"
         source_files = tree_hashes(args.storage_source)
@@ -434,53 +382,63 @@ def build(args, repository, java_home, work, target, profile):
                     output=provenance / "storage-working-tree.patch")
             elif args.storage_patch:
                 shutil.copy2(args.storage_patch, provenance / "storage-working-tree.patch")
-        knowhere = sources / "knowhere"
-        knowhere_identity = provenance / "knowhere-source-files.json"
-        recorded_knowhere = json.loads(knowhere_identity.read_text()) if knowhere_identity.exists() else None
-        clone(knowhere_object_source, knowhere_pin, knowhere, recorded_knowhere)
-        cardinal = {}
-        if args.with_cardinal:
-            # The tags come from the Knowhere snapshot just cloned unless the caller
-            # overrides a generation; the resolved commits go into the provenance so
-            # a resumed build can be checked.
-            cardinal_identity = provenance / "cardinal-source-identity.json"
-            versions = cardinal_versions(knowhere)
-            versions.update(getattr(args, "cardinal_overrides", {}))
-            for generation, tag in versions.items():
-                local_source = knowhere_object_source / "thirdparty" / ("cardinal" + generation)
-                origin = args.cardinal_repository or (
-                    str(local_source) if (local_source / ".git").exists() else "https://github.com/zilliztech/cardinal.git")
-                revision = clone_ref(origin, tag, knowhere / "thirdparty" / ("cardinal" + generation))
-                cardinal[generation] = {"tag": tag, "revision": revision}
-            if cardinal_identity.exists() and json.loads(cardinal_identity.read_text()) != cardinal:
-                raise RuntimeError("Cardinal source changed; use a new work directory")
-            cardinal_identity.write_text(json.dumps(cardinal, indent=2) + "\n")
-        knowhere_files = tree_hashes(knowhere)
-        if knowhere_identity.exists() and json.loads(knowhere_identity.read_text()) != knowhere_files:
-            raise RuntimeError("Knowhere/Cardinal source snapshot changed; use a new work directory")
-        knowhere_identity.write_text(json.dumps(knowhere_files, indent=2) + "\n")
-        knowhere_source_identity = provenance / "knowhere-source-identity.json"
-        knowhere_identity_record = {"revision": knowhere_pin, "files": knowhere_files}
-        if (knowhere_source_identity.exists()
-                and json.loads(knowhere_source_identity.read_text()) != knowhere_identity_record):
-            raise RuntimeError("Knowhere source changed or the snapshot is unverified; use a new work directory")
-        knowhere_source_identity.write_text(json.dumps(knowhere_identity_record, indent=2) + "\n")
         adapter = platforms.host()
-        metadata = {"format.version": "1", "platform": target, "dependency.mode": "shared",
-                    "build.system": "independent-cmake",
-                    "storage.revision": storage_pin, "knowhere.revision": knowhere_pin,
-                    "with_cardinal": args.with_cardinal,
-                    "with_diskann": adapter.builds_diskann(),
+        metadata = {"format.version": "2", "platform": target, "dependency.mode": "shared",
+                    "build.system": "independent-cmake", "components": ["storage", *component_names],
+                    "storage.revision": storage_pin,
                     "storageSourceManifestSha256": digest(provenance / "storage-source-files.json"),
-                    "knowhereSourceManifestSha256": digest(knowhere_identity),
-                    "knowhereSourceIdentitySha256": digest(knowhere_source_identity),
-                    "sourceDirectories": {"storage": str(storage), "knowhere": str(knowhere)},
-                    "sourceObjectDirectories": {"storage": str(args.storage_source.resolve()),
-                                                "knowhere": str(knowhere_object_source)},
-                    "cardinal": cardinal,
+                    "sourceDirectories": {"storage": str(storage)},
+                    "sourceObjectDirectories": {"storage": str(args.storage_source.resolve())},
+                    "sourceLicenseDocuments": {"storage": ["LICENSE"]},
+                    "loadEntries": [adapter.library_name("milvus-storage-jni")],
+                    "dlopenEntries": [adapter.library_name("milvus-storage-jni"), adapter.library_name("milvus-storage")],
+                    "parentProviders": {}, "componentTests": [],
                     "featureOptions": {"storage.jemalloc": False, "storage.fiu": False,
                                        "storage.crt": False, "storage.talon": True,
                                        "storage.rust.openssl.shared": True}, "jobs": args.jobs}
+        overlay = extension.get("metadata", {})
+        if set(overlay).intersection(metadata):
+            raise ValueError("External metadata cannot override driver-owned identity")
+        metadata.update(overlay)
+        metadata["features"] = extension.get("featureOptions", {})
+        if any(type(value) is not bool for value in metadata["features"].values()):
+            raise ValueError("Native component features must be booleans")
+        component_files = {}
+        for component in components:
+            name = component["name"]
+            if not re.fullmatch(r"[a-f0-9]{40}", component["revision"]):
+                raise ValueError("External component needs an exact revision: " + name)
+            source = Path(component["sourceDirectory"]).resolve(strict=True)
+            files = tree_hashes(source)
+            component_files[name] = files
+            for suffix, value in (("files", files), ("identity", {"revision": component["revision"], "files": files})):
+                record = provenance / (name + "-source-" + suffix + ".json")
+                if record.exists() and json.loads(record.read_text()) != value:
+                    raise ValueError("External component source changed: " + name)
+                record.write_text(json.dumps(value, indent=2) + "\n")
+            metadata[name + ".revision"] = component["revision"]
+            metadata[name + "SourceManifestSha256"] = digest(provenance / (name + "-source-files.json"))
+            metadata[name + "SourceIdentitySha256"] = digest(provenance / (name + "-source-identity.json"))
+            metadata["sourceDirectories"][name] = str(source)
+            metadata["sourceObjectDirectories"][name] = component.get("sourceObjectDirectory", str(source))
+            licenses = component.get("sourceLicenseDirectories", ["LICENSE"])
+            if isinstance(licenses, dict):
+                for owner, record in licenses.items():
+                    metadata["sourceDirectories"][owner] = record["directory"]
+                    metadata["sourceLicenseDocuments"][owner] = record["files"]
+            else:
+                metadata["sourceLicenseDocuments"][name] = licenses
+            extension_files = tree_hashes(Path(component["cmake"]).parent)
+            extension_record = provenance / (name + "-extension-files.json")
+            if extension_record.exists() and json.loads(extension_record.read_text()) != extension_files:
+                raise ValueError("External component build implementation changed: " + name)
+            extension_record.write_text(json.dumps(extension_files, indent=2) + "\n")
+            metadata[name + "ExtensionManifestSha256"] = digest(extension_record)
+            metadata["loadEntries"].extend(component["loadEntries"])
+            metadata["dlopenEntries"].extend(component["dlopenEntries"])
+            metadata["parentProviders"].update(component.get("parentProviders", {}))
+        for field in ("loadEntries", "dlopenEntries"):
+            metadata[field] = list(dict.fromkeys(metadata[field]))
         for name, command in (*adapter.toolchain_versions(), ("cmake", ["cmake", "--version"]),
                               ("conan", ["conan", "--version"]), ("java", [str(java_home / "bin/java"), "-version"]),
                               ("rustc", ["rustc", "--version", "--verbose"]), ("cargo", ["cargo", "--version"]),
@@ -504,24 +462,23 @@ def build(args, repository, java_home, work, target, profile):
         storage_recipe = (git_value(args.storage_source, "show", storage_pin + ":cpp/conanfile.py")
                           if (args.storage_source / ".git").exists()
                           else (storage / "cpp/conanfile.py").read_text())
-        knowhere_recipe = git_value(knowhere, "show", knowhere_pin + ":conanfile.py")
         conan_os = adapter.conan_os
-        version_selection = validate_upstream_versions(
-            constraints, storage_recipe, knowhere_recipe,
-            conan_os=conan_os, with_cardinal=args.with_cardinal)
-        version_selection["sourceRevisions"] = {"storage": storage_pin, "knowhere": knowhere_pin}
-        version_selection["recipeSha256"] = {
-            name: hashlib.sha256(source.encode()).hexdigest()
-            for name, source in (("storage", storage_recipe), ("knowhere", knowhere_recipe))}
+        recipes = {"storage": (storage_recipe, {"with_crt": False, "with_ut": False, "with_benchmark": False})}
+        recipes.update({component["name"]: (Path(component["recipe"]).read_text(), component["recipeOptions"])
+                        for component in components})
+        version_selection = validate_upstream_versions(constraints, recipes, conan_os=conan_os)
+        version_selection["sourceRevisions"] = {name: metadata[name + ".revision"] for name in metadata["components"]}
+        version_selection["recipeSha256"] = {name: hashlib.sha256(recipe.encode()).hexdigest()
+                                              for name, (recipe, _) in recipes.items()}
         (provenance / "dependency-version-selection.json").write_text(
             json.dumps(version_selection, indent=2) + "\n")
         # Validate the lock against the same platform and feature selection as Conan.
         references = selected_references(
-            constraints, conan_os=conan_os, with_cardinal=args.with_cardinal)
+            constraints, conan_os=conan_os)
         consumer = work / "dependency-input"
         consumer.mkdir(exist_ok=True)
         shutil.copy2(repository / "native/build/conanfile.py", consumer / "conanfile.py")
-        shutil.copy2(repository / "native/build/dependencies.json", consumer / "dependencies.json")
+        (consumer / "dependencies.json").write_text(json.dumps(constraints, indent=2) + "\n")
         (provenance / "direct-references.json").write_text(json.dumps(references, indent=2) + "\n")
         platform_tools = platform_tool_requirements(profile)
         replacements = replace_requires_section(references)
@@ -535,12 +492,18 @@ def build(args, repository, java_home, work, target, profile):
         profiles = ["-pr:h", host_profile, "-pr:b", build_profile,
                     "-c:h", "tools.build:jobs=" + str(args.jobs), "-c:b", "tools.build:jobs=" + str(args.jobs)]
         openmp_generators = work / "openmp-config"
-        options = [*profiles, "-o:h", "with_cardinal=" + str(args.with_cardinal),
-                   *macos_openmp_redirect(references, openmp_generators)]
+        options = [*profiles, *macos_openmp_redirect(references, openmp_generators)]
+        for key, value in sorted(extension.get("conanOptions", {}).items()):
+            options.extend(("-o:h", key + "=" + str(value)))
+        for key, value in sorted(extension.get("conanConf", {}).items()):
+            options.extend(("-c:h", key + "=" + (json.dumps(value) if not isinstance(value, str) else value)))
         inputs = {"references": references, "hostProfile": host_profile.read_text(),
                   "consumerSha256": digest(consumer / "conanfile.py"),
                   "dependencySelectionSha256": digest(consumer / "dependencies.json"),
-                  "withCardinal": args.with_cardinal,
+                  "components": metadata["components"],
+                  "componentOptions": extension.get("conanOptions", {}),
+                  "componentConf": extension.get("conanConf", {}),
+                  "features": metadata["features"],
                   "jobs": args.jobs}
         input_file = provenance / "dependency-input.json"
         lockfile = provenance / "conan.lock"
@@ -657,8 +620,13 @@ def build(args, repository, java_home, work, target, profile):
                   "-DCMAKE_C_COMPILER=" + platforms.host().toolchain()["CC"],
                   "-DCMAKE_CXX_COMPILER=" + platforms.host().toolchain()["CXX"],
                   "-DCMAKE_INSTALL_PREFIX=" + str(install),
-                  "-DMILVUS_STORAGE_SOURCE_DIR=" + str(storage), "-DKNOWHERE_SOURCE_DIR=" + str(knowhere),
-                  "-DWITH_CARDINAL=" + ("ON" if args.with_cardinal else "OFF")]
+                  "-DMILVUS_STORAGE_SOURCE_DIR=" + str(storage),
+                  "-DMILVUS_COMPONENT_CMAKE=" + ";".join(component["cmake"] for component in components)]
+        for component in components:
+            for key, value in component.get("cmakeVariables", {}).items():
+                if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
+                    raise ValueError("Invalid component CMake variable: " + key)
+                common.append("-D" + key + "=" + ("ON" if value is True else "OFF" if value is False else str(value)))
         if args.cargo_cache and not (native_build / "cargo/build").exists():
             phase("seed-cargo-cache")
             (native_build / "cargo").mkdir(parents=True, exist_ok=True)
@@ -671,7 +639,7 @@ def build(args, repository, java_home, work, target, profile):
         trace = provenance / "cmake-trace.jsonl"
         run(["cmake", "-S", repository / "native/build", "-B", native_build, *common,
              "--trace-expand", "--trace-format=json-v1", "--trace-redirect=" + str(trace)], env=build_env)
-        metadata["cmakeTraceCommands"] = check_cmake_trace(trace, [storage, knowhere])
+        metadata["cmakeTraceCommands"] = check_cmake_trace(trace, [storage, *(Path(component["sourceDirectory"]) for component in components)])
         metadata["cmakeTraceSha256"] = digest(trace)
         # Cargo owns its own parallel scheduler; finish it before scheduling C++.
         phase("build-storage-rust")
@@ -681,28 +649,29 @@ def build(args, repository, java_home, work, target, profile):
         run(["cmake", "--build", native_build, "--parallel", args.jobs], env=cpp_env)
         phase("install-engines-and-jni")
         run(["cmake", "--install", native_build], env=build_env)
-        phase("test-knowhere-c-api")
-        discovery = subprocess.check_output(
-            ["ctest", "--test-dir", str(native_build), "--show-only=json-v1", "-R", "^knowhere_c_api"],
-            env=build_env, text=True)
-        (provenance / "knowhere-c-api-discovery.json").write_text(discovery)
-        test_names = sorted(test["name"] for test in json.loads(discovery)["tests"])
-        if test_names != knowhere_c_api_tests(platforms.host()):
-            raise RuntimeError("Unexpected Knowhere C API test set: " + repr(test_names))
-        with (provenance / "knowhere-c-api-tests.log").open("w") as log:
-            test_result = subprocess.run(
-                ["ctest", "--test-dir", str(native_build), "--output-on-failure", "-R", "^knowhere_c_api"],
-                env=build_env, stdout=log, stderr=subprocess.STDOUT, check=False)
-        metadata["knowhereCApiTestsExit"] = test_result.returncode
-        metadata["knowhereCApiTests"] = test_names
+        for component in components:
+            expected_tests = sorted(component.get("testNames", []))
+            if not expected_tests:
+                continue
+            pattern = ctest_pattern(expected_tests)
+            discovery = subprocess.check_output(["ctest", "--test-dir", str(native_build), "--show-only=json-v1", "-R", pattern],
+                                                env=build_env, text=True)
+            actual_tests = sorted(test["name"] for test in json.loads(discovery)["tests"])
+            if actual_tests != expected_tests:
+                raise RuntimeError("Incomplete component native tests: " + component["name"])
+            test_log = provenance / (component["name"] + "-tests.log")
+            with test_log.open("w") as log:
+                result = subprocess.run(["ctest", "--test-dir", str(native_build), "--output-on-failure", "-R", pattern],
+                                        env=build_env, stdout=log, stderr=subprocess.STDOUT, check=False)
+            metadata["componentTests"].append({"component": component["name"], "tests": actual_tests,
+                                                "exit": result.returncode, "logSha256": digest(test_log)})
         shutil.copy2(native_build / "compile_commands.json", provenance / "compile_commands.json")
         run(["ninja", "-C", native_build, "-t", "commands"], output=provenance / "native-build-commands.txt", env=build_env)
         metadata["compileCommandsSha256"] = digest(provenance / "compile_commands.json")
         metadata["nativeBuildCommandsSha256"] = digest(provenance / "native-build-commands.txt")
-        metadata["knowhereCApiDiscoverySha256"] = digest(provenance / "knowhere-c-api-discovery.json")
-        metadata["knowhereCApiTestLogSha256"] = digest(provenance / "knowhere-c-api-tests.log")
-        if (tree_hashes(storage) != source_files or tree_hashes(knowhere) != knowhere_files
-                or tree_hashes(corrosion) != corrosion_files):
+        if (tree_hashes(storage) != source_files or tree_hashes(corrosion) != corrosion_files
+                or any(tree_hashes(Path(component["sourceDirectory"])) != component_files[component["name"]]
+                       for component in components)):
             raise RuntimeError("Native build modified its upstream source inputs")
         (provenance / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
         phase("stage-unified-libraries")
@@ -713,10 +682,10 @@ def build(args, repository, java_home, work, target, profile):
         candidate = candidates / (time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + uuid.uuid4().hex[:8])
         status["candidate"] = str(candidate)
         run([sys.executable, repository / "native/build/stage.py", "--graph", provenance / "conan-graph.json",
-             "--storage-build", install / "lib", "--knowhere-build", install / "lib",
+             "--storage-build", install / "lib",
              "--output", candidate, "--metadata", provenance / "metadata.json"], env=env)
-        if test_result.returncode:
-            raise RuntimeError("Knowhere C API tests failed; staged candidate is diagnostic only")
+        if any(record["exit"] for record in metadata["componentTests"]):
+            raise RuntimeError("Native component tests failed; staged candidate is diagnostic only")
         promote_bundle(candidate, work)
         status["bundle"] = str(work / "bundle")
         phase("complete")

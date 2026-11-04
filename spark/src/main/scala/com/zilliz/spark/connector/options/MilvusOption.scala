@@ -22,17 +22,6 @@ object MilvusOption {
   val ReadBatchMaxRows = "milvus.read.batch.max.rows"
   val ReadBatchMaxBytes = "milvus.read.batch.max.bytes"
   val ReadArrowMaxBytes = "milvus.read.arrow.max.bytes"
-  val SearchQueriesMaxBytes = "milvus.search.queries.max.bytes"
-  val SearchGroupMaxBytes = "milvus.search.group.max.bytes"
-  val SearchSegmentsMaxBytes = "milvus.search.segments.max.bytes"
-  val SearchCollectThreads = "milvus.search.collect.threads"
-  val SearchQueryRanges = "milvus.search.query.ranges"
-  // Index segments a search task keeps searching at once within one query
-  // group (default 2): the next segment's call fills the tail of the current one
-  val SearchCallsInFlight = "milvus.search.calls.in.flight"
-  // An index's search tuning, given with the base input of a NEAREST BY:
-  // ef for the HNSW family, nprobe for the IVF family.
-  val SearchParams = "milvus.search.params"
   val MilvusFilter = "milvus.filter"
 
   val MilvusExtraColumns = "milvus.extra.columns"
@@ -63,8 +52,6 @@ object MilvusOption {
 
   // reader config
   val ReaderFieldIDs = "fieldIDs"
-
-  // vector search config
 
   // s3 config
   val S3Endpoint = "s3.endpoint"
@@ -166,17 +153,6 @@ object MilvusOption {
     validateSnapshotModeOptionsFrom(key => Option(options.get(key)))
   }
 
-  /** The search tuning a read names in `milvus.search.params`; none when the
-    * option is absent or blank.
-    */
-  def searchParameters(
-      options: Map[String, String]
-  ): scala.collection.immutable.Map[String, String] =
-    OptionParsing
-      .value(options, SearchParams)
-      .map(OptionParsing.namedValues(_, s"'$SearchParams'"))
-      .getOrElse(scala.collection.immutable.Map.empty)
-
   private def readApplyDeletesFrom(
       getOption: String => Option[String]
   ): Boolean =
@@ -212,8 +188,7 @@ object MilvusOption {
   /** Whether the scan hands Spark whole batches instead of rows. Columnar
     * output is the default. Row and columnar readers share the V3 format and
     * delete contracts, covered by fixed read fixtures. `false` selects the row
-    * path. A nearest-by join executed by the connector reads segments directly,
-    * so this option does not affect vector search.
+    * path.
     */
   private def readColumnarFrom(
       getOption: String => Option[String]

@@ -76,7 +76,7 @@ help:
 	@echo "$(YELLOW)Available targets:$(NC)"
 	@echo "  $(GREEN)all$(NC)                    - Complete build process"
 	@echo "  $(GREEN)clean$(NC)                  - Clean all build artifacts"
-	@echo "  $(GREEN)native-build$(NC)           - Build unified native dependencies (storage and Knowhere)"
+	@echo "  $(GREEN)native-build$(NC)           - Build unified native dependencies (storage)"
 	@echo "  $(GREEN)native-bundle$(NC)          - Build and package, or select NATIVE_BUNDLE"
 	@echo "  $(GREEN)native-resources$(NC)       - Same as native-bundle; the target Docker calls"
 	@echo "  $(GREEN)package$(NC)                - Package JAR with the selected platform resources"
@@ -101,12 +101,12 @@ help:
 # Initialize Git submodules
 init-submodules:
 	@echo "$(BLUE)Initializing Git submodules...$(NC)"
-	@git submodule update --init --recursive milvus-proto milvus-storage knowhere
+	@git submodule update --init --recursive milvus-proto milvus-storage
 	@echo "$(GREEN)Submodules initialized$(NC)"
 
 # Preserve initialized worktrees so the builder records their actual revisions and changes.
 init-missing-submodules:
-	@set -e; for submodule in milvus-storage milvus-proto knowhere; do \
+	@set -e; for submodule in milvus-storage milvus-proto; do \
 		if [ ! -e "$$submodule/.git" ]; then git submodule update --init --recursive -- "$$submodule"; fi; \
 	done
 

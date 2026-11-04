@@ -54,7 +54,7 @@ public class NativeStorageLibraryTest {
     @Test
     public void invalidBundleDoesNotFallBackToAnotherStorageLibrary() throws Exception {
         String output = runProbe(bundle(true), "failure");
-        assertTrue(output, output.contains("Checksum mismatch for libknowhere_jni.so"));
+        assertTrue(output, output.contains("Checksum mismatch for libmilvus-storage-jni.so"));
         assertTrue(output, output.contains("STORAGE_FAILED_CLOSED"));
     }
 
@@ -89,18 +89,17 @@ public class NativeStorageLibraryTest {
 
     private Path bundle(boolean corrupt) throws Exception {
         Path jar = temporary.newFile("unified-" + System.nanoTime() + ".jar").toPath();
-        String prefix = "native/milvus/1/linux-x86_64/";
-        String libraries = "libmilvus-storage-jni.so,libknowhere_jni.so";
+        String prefix = "native/milvus/2/linux-x86_64/";
+        String libraries = "libmilvus-storage-jni.so";
         Properties expected = new Properties();
-        try (InputStream input = NativeLibraries.class.getResourceAsStream(
-                "/META-INF/milvus-native/compatibility.properties")) {
+        try (InputStream input = NativeStorageLibrary.class.getResourceAsStream(
+                "/META-INF/milvus-native/requirements/storage.properties")) {
             expected.load(Objects.requireNonNull(input, "JVM native compatibility metadata"));
         }
-        StringBuilder manifest = new StringBuilder("format.version=1\nplatform=linux-x86_64\n"
-                + "storage.revision=" + expected.getProperty("storage.revision")
-                + "\nknowhere.revision=" + expected.getProperty("knowhere.revision")
-                + "\nwith_cardinal=false\nlibraries=" + libraries
-                + "\nload.entries=libmilvus-storage-jni.so,libknowhere_jni.so\n");
+        StringBuilder manifest = new StringBuilder("format.version=2\ncomponents=storage\nplatform=linux-x86_64\n"
+                + "storage.revision=" + expected.getProperty("revision")
+                + "\nlibraries=" + libraries
+                + "\nload.entries=libmilvus-storage-jni.so\n");
         try (JarOutputStream output = new JarOutputStream(Files.newOutputStream(jar))) {
             for (String library : libraries.split(",")) {
                 byte[] checksum = MessageDigest.getInstance("SHA-256")
@@ -109,7 +108,7 @@ public class NativeStorageLibraryTest {
                 for (byte value : checksum) hex.append(String.format("%02x", value & 0xff));
                 manifest.append("sha256.").append(library).append('=').append(hex).append('\n');
                 entry(output, prefix + library,
-                        corrupt && library.equals("libknowhere_jni.so") ? "corrupt" : library);
+                        corrupt && library.equals("libmilvus-storage-jni.so") ? "corrupt" : library);
             }
             entry(output, prefix + "manifest.properties", manifest.toString());
         }
