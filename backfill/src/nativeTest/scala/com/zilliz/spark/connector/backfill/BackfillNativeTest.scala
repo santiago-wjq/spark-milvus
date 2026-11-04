@@ -668,6 +668,11 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
       val expired =
         new IllegalStateException("snapshot protection budget exhausted")
       var guardCalls = 0
+      var completionCalls = 0
+      def complete(result: BackfillResult): BackfillResult = {
+        completionCalls += 1
+        result.copy(stagingPrefix = "driver-owned-receipt")
+      }
       val failed = MilvusBackfill.runPrepared(
         spark,
         input,
@@ -677,11 +682,13 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
         10L,
         "source",
         () => { guardCalls += 1; throw expired },
-        snapshotAdapter = BackfillSnapshotAdapter.V3Only
+        snapshotAdapter = BackfillSnapshotAdapter.V3Only,
+        onResult = complete
       )
       assert(failed.isLeft)
       assert(failed.left.toOption.get.cause.contains(expired))
       assert(guardCalls == 1)
+      assert(completionCalls == 0)
       assert(files() == before)
       assertRows(read(storage, source, None), None)
 
@@ -695,10 +702,13 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
           10L,
           "source",
           () => { guardCalls += 1; () },
-          snapshotAdapter = BackfillSnapshotAdapter.V3Only
+          snapshotAdapter = BackfillSnapshotAdapter.V3Only,
+          onResult = complete
         )
         .fold(error => fail(error.message, error.cause.orNull), identity)
       assert(guardCalls == 2)
+      assert(completionCalls == 1)
+      assert(result.stagingPrefix == "driver-owned-receipt")
       assert(result.segmentsProcessed == 2 && result.totalRowsWritten == 6L)
       assert(result.newFieldNames == Seq("n"))
       assertRows(read(storage, source, Some(result)), Some("coalesce"))
@@ -734,7 +744,8 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
             collectionId,
             snapshotName,
             () => { guardCalls += 1; () },
-            snapshotAdapter = BackfillSnapshotAdapter.V3Only
+            snapshotAdapter = BackfillSnapshotAdapter.V3Only,
+            onResult = _ => fail("foreign snapshots must not produce a result")
           )
           assert(result.isLeft)
           assert(result.left.toOption.get.isInstanceOf[SchemaValidationError])
@@ -812,7 +823,8 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
           10L,
           "source",
           () => { guardCalls += 1; throw expired },
-          snapshotAdapter = BackfillSnapshotAdapter.V3Only
+          snapshotAdapter = BackfillSnapshotAdapter.V3Only,
+          onResult = _ => fail("failed writes must not produce a result")
         )
         assert(failed.left.toOption.exists(_.cause.contains(expired)))
         assert(guardCalls == 1)
