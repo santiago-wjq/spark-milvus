@@ -10,6 +10,13 @@ def selected_references(constraints, *, conan_os):
             if not scope.get(name) or conan_os in scope[name]}
 
 
+def selected_transitive_references(constraints, *, conan_os):
+    """Pin reviewed transitive recipes without replacing their version requirements."""
+    scope = constraints.get("platform_scope", {})
+    return {name: reference for name, reference in constraints.get("transitive_references", {}).items()
+            if not scope.get(name) or conan_os in scope[name]}
+
+
 def _requirements(source, *, conan_os, options):
     """Read the pinned recipes' literal requirements without executing Conan code.
 
