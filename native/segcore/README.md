@@ -233,6 +233,9 @@ integer and string fields. The second loads the sealed segments of the `api`
 collection fixture (`core/src/test/resources/read-fixtures/collections/api`)
 from their V3 manifests with only `id` and `category`, checks comparison,
 `IN`, `AND`, `OR` and `NOT` there, and cancels one load before it completes.
+Its plans collect segcore's execution feature bits
+(`retrievePlanFeatureBits`), and a filter on `category`, which has no index,
+must report the raw-data path.
 Every expected answer is computed from the fixture's literal input rows in
 `expected.json`, never from a read of the stored bytes. The probe then leaves
 through `System.exit`, as an executor's JVM does, and `run_probe.sh` fails a
@@ -249,8 +252,10 @@ sealed fixture covers string fields.
 - Tests of remote storage and of scalar indexes. `initRemoteFileSystem` and
   `initRemoteChunkManager` have loaded a segment Milvus wrote to S3 together
   with its BITMAP, INVERTED, STL_SORT and TRIE indexes in packed V3 files,
-  checked by hand against the rows written, but no test here covers an object
-  store, and no fixture carries a scalar index.
+  checked by hand against the rows written. Every single-field filter on an
+  indexed field reported its index's path and family, except suffix matches
+  on an INVERTED string field, which segcore declines to the raw data. No
+  test here covers an object store, and no fixture carries a scalar index.
 - A clean exit with both the remote file system and the remote chunk manager
   initialized. segcore's chunk managers take a reference to the AWS SDK
   (`Aws::InitAPI`) and never release it, which Milvus's Go process, exiting

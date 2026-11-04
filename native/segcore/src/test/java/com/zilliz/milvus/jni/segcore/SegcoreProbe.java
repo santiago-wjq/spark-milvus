@@ -59,6 +59,9 @@ public final class SegcoreProbe {
     private static final int AND = 1;
     private static final int OR = 2;
     private static final int NOT = 1;
+    // milvus::FeatureBit, common/FeatureBits.h
+    private static final int FILTER_PATH_SCALAR_INDEX = 0;
+    private static final int FILTER_PATH_BRUTE_FORCE = 5;
 
     private static final long[] PKS = {1, 2, 3, 4, 5, 6};
     private static final long[] AGES = {10, 25, 30, 45, 50, 65};
@@ -183,6 +186,10 @@ public final class SegcoreProbe {
                     first, r -> r.category() != 1 || r.id() < 3002);
                 expectRows(collection, segment, "id > 9000", range(ID, INT64, GREATER_THAN, int64(9000)), first,
                     r -> r.id() > 9000);
+                // The fixture has no scalar index, so a filter on category
+                // reads its raw data.
+                expectPath(collection, segment, "category == 1", range(CATEGORY, INT64, EQUAL, int64(1)),
+                    FILTER_PATH_BRUTE_FORCE, FILTER_PATH_SCALAR_INDEX);
             } finally {
                 SegcoreNative.deleteSegment(segment);
             }
@@ -270,6 +277,24 @@ public final class SegcoreProbe {
         }
     }
 
+    // A retrieve whose plan records bit `used` of the execution features and
+    // not bit `unused`.
+    private static void expectPath(long collection, long segment, String label, Proto predicate, int used,
+        int unused) {
+        long plan = SegcoreNative.createRetrievePlan(collection, plan(predicate, ID));
+        try {
+            SegcoreNative.retrieve(segment, plan, 1000, 1L << 30);
+            long bits = SegcoreNative.retrievePlanFeatureBits(plan);
+            if ((bits & (1L << used)) == 0 || (bits & (1L << unused)) != 0) {
+                throw new AssertionError(label + ": feature bits " + Long.toBinaryString(bits) + " lack bit " + used
+                    + " or carry bit " + unused);
+            }
+            System.out.println("ok: " + label + " -> feature bits " + Long.toBinaryString(bits));
+        } finally {
+            SegcoreNative.deleteRetrievePlan(plan);
+        }
+    }
+
     private static void compare(String label, long[] got, long[] want) {
         if (!Arrays.equals(got, want)) {
             throw new AssertionError(label + ": want " + Arrays.toString(want) + ", got " + Arrays.toString(got));
@@ -277,10 +302,12 @@ public final class SegcoreProbe {
         System.out.println("ok: " + label + " -> " + Arrays.toString(got));
     }
 
-    // planpb.PlanNode{query=4 -> QueryPlanNode{predicates=1}, output_field_ids=3}
+    // planpb.PlanNode{query=4 -> QueryPlanNode{predicates=1}, output_field_ids=3,
+    // plan_options=7 -> PlanOption{collect_feature_bits=2}}
     private static byte[] plan(Proto predicate, long... outputs) {
         Proto query = new Proto().message(1, predicate);
-        return new Proto().message(4, query).packedInt64(3, outputs).bytes();
+        Proto options = new Proto().bool(2, true);
+        return new Proto().message(4, query).packedInt64(3, outputs).message(7, options).bytes();
     }
 
     // planpb.ColumnInfo{field_id=1, data_type=2, is_primary_key=3}

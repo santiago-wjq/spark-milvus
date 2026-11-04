@@ -86,6 +86,15 @@ public final class SegcoreNative {
 
     public static native void deleteRetrievePlan(long plan);
 
+    /**
+     * GetRetrievePlanFeatureBits: the execution features the plan used in
+     * every retrieve it served, as milvus::FeatureBit flags
+     * (common/FeatureBits.h): each filter's path, such as a scalar index or
+     * raw data, and the index families that served it. 0 unless the
+     * PlanNode's plan_options set collect_feature_bits.
+     */
+    public static native long retrievePlanFeatureBits(long plan);
+
     /** NewSegment of type Growing. */
     public static native long newGrowingSegment(long collection, long segmentId);
 

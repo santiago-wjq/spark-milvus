@@ -418,6 +418,13 @@ Java_com_zilliz_milvus_jni_segcore_SegcoreNative_deleteRetrievePlan(JNIEnv*, jcl
     DeleteRetrievePlan(reinterpret_cast<CRetrievePlan>(plan));
 }
 
+// The bits are milvus::FeatureBit flags (common/FeatureBits.h), accumulated
+// over every retrieve the plan served.
+JNIEXPORT jlong JNICALL
+Java_com_zilliz_milvus_jni_segcore_SegcoreNative_retrievePlanFeatureBits(JNIEnv*, jclass, jlong plan) {
+    return static_cast<jlong>(GetRetrievePlanFeatureBits(reinterpret_cast<CRetrievePlan>(plan)));
+}
+
 JNIEXPORT jlong JNICALL
 Java_com_zilliz_milvus_jni_segcore_SegcoreNative_newGrowingSegment(JNIEnv* env, jclass, jlong collection,
                                                                     jlong segmentId) {
