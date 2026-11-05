@@ -1,10 +1,11 @@
 package com.zilliz.spark.connector.backfill
 
-import java.nio.file.{Files, Path}
+import java.nio.file.{Files, Path, Paths}
 import java.util.{Base64, UUID}
 import scala.jdk.CollectionConverters._
 
-import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.{JsonNode, ObjectMapper}
+import com.fasterxml.jackson.databind.node.ObjectNode
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.types.{LongType, StructField, StructType}
@@ -87,6 +88,12 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
       .config("spark.sql.adaptive.enabled", "false")
       .getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
+    spark.sparkContext.hadoopConfiguration.set(
+      s"fs.s3a.bucket.${required("BACKFILL_TEST_S3_BUCKET")}.bucket.probe",
+      "0"
+    )
+    // Catalog inputs select their endpoint globally after clearing bucket overrides.
+    spark.sparkContext.hadoopConfiguration.set("fs.s3a.bucket.probe", "0")
   }
   override def afterAll(): Unit = {
     try if (spark != null) spark.stop()
@@ -191,10 +198,10 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
           {"fieldID":101,"name":"n","data_type":"Int64","nullable":true}]}},
         "format_version":4,"segment_ids":["31","32"]
       }""")
-        .asInstanceOf[com.fasterxml.jackson.databind.node.ObjectNode]
+        .asInstanceOf[ObjectNode]
       val list = document.putArray("manifest_list")
       avros.foreach(list.add)
-      document.set[com.fasterxml.jackson.databind.JsonNode](
+      document.set[JsonNode](
         "storagev2_manifest_list",
         mapper.readTree(SegmentListJson.encodeManifestItems(items))
       )
@@ -683,7 +690,8 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
         "source",
         () => { guardCalls += 1; throw expired },
         snapshotAdapter = BackfillSnapshotAdapter.V3Only,
-        onResult = complete
+        onResult = complete,
+        onRecovery = _ => fail("unexpected partial write")
       )
       assert(failed.isLeft)
       assert(failed.left.toOption.get.cause.contains(expired))
@@ -703,7 +711,8 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
           "source",
           () => { guardCalls += 1; () },
           snapshotAdapter = BackfillSnapshotAdapter.V3Only,
-          onResult = complete
+          onResult = complete,
+          onRecovery = _ => fail("unexpected partial write")
         )
         .fold(error => fail(error.message, error.cause.orNull), identity)
       assert(guardCalls == 2)
@@ -724,7 +733,7 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
       val source = fixture(root, storage)
       val document = mapper
         .readTree(Files.readString(source.snapshot))
-        .asInstanceOf[com.fasterxml.jackson.databind.node.ObjectNode]
+        .asInstanceOf[ObjectNode]
       document.putArray("manifest_list").add("does-not-exist.avro")
       val wrong = root.resolve("wrong-snapshot.json")
       Files.writeString(wrong, document.toString)
@@ -745,7 +754,8 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
             snapshotName,
             () => { guardCalls += 1; () },
             snapshotAdapter = BackfillSnapshotAdapter.V3Only,
-            onResult = _ => fail("foreign snapshots must not produce a result")
+            onResult = _ => fail("foreign snapshots must not produce a result"),
+            onRecovery = _ => fail("unexpected partial write")
           )
           assert(result.isLeft)
           assert(result.left.toOption.get.isInstanceOf[SchemaValidationError])
@@ -824,7 +834,8 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
           "source",
           () => { guardCalls += 1; throw expired },
           snapshotAdapter = BackfillSnapshotAdapter.V3Only,
-          onResult = _ => fail("failed writes must not produce a result")
+          onResult = _ => fail("failed writes must not produce a result"),
+          onRecovery = _ => ()
         )
         assert(failed.left.toOption.exists(_.cause.contains(expired)))
         assert(guardCalls == 1)
@@ -848,6 +859,327 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 
+  for {
+    capability <- Seq("legacy", "manifest-delta-v1")
+    failClose <- Seq(false, true)
+  } test(
+    s"CLI $capability publishes once before actual input cleanup; close failure=$failClose"
+  ) {
+    withDirectory { root =>
+      val storage = localStorage(root)
+      val source = fixture(root, storage)
+      val input = root.resolve("input")
+      inputFrame.write.parquet(input.toString)
+      val tag = UUID.randomUUID().toString
+      val state = CleanupInputFileSystems.register(tag)
+      state.failClose = failClose
+      val conf = spark.sparkContext.hadoopConfiguration
+      conf.setClass(
+        "fs.cleanup.impl",
+        classOf[CleanupInputFileSystem],
+        classOf[org.apache.hadoop.fs.FileSystem]
+      )
+      conf.setBoolean("fs.cleanup.impl.disable.cache", true)
+      val config = BackfillConfig(
+        storageProperties = storage,
+        receiverCapability = capability,
+        batchSize = 2
+      )
+      val resultPath = root.resolve("cli-result.json")
+      var publications = 0
+      try {
+        val outcome = MilvusBackfill.run(
+          spark,
+          s"cleanup://$tag${input.toAbsolutePath}",
+          source.snapshot.toString,
+          config,
+          onResult = result => {
+            publications += 1
+            val recorded = BackfillApp.publishResult(
+              result,
+              resultPath.toString,
+              (value, path) =>
+                BackfillStorage.writeResolvedResultJson(value, path, config)
+            )
+            state.published = true
+            recorded
+          },
+          onRecovery =
+            _ => fail("complete writes must not publish partial recovery")
+        )
+        assert(publications == 1)
+        assert(state.publishedCloses.get() == 1)
+        val receipt = mapper.readTree(Files.readAllBytes(resultPath))
+        assert(receipt.get("success").asBoolean())
+        assert(receipt.get("totalRowsWritten").asLong() == 6L)
+        if (failClose) {
+          val error = outcome.left.toOption.get
+          assert(error.stage == "cleanup")
+          assert(error.cleanupComplete.contains(false))
+          assert(error.cause.contains(state.cleanupFailure))
+          assert(BackfillApp.complete(outcome) == 1)
+        } else {
+          assert(outcome.isRight)
+          assert(BackfillApp.complete(outcome) == 0)
+        }
+        assertRows(read(storage, source, None), None)
+      } finally {
+        conf.unset("fs.cleanup.impl")
+        conf.unset("fs.cleanup.impl.disable.cache")
+        CleanupInputFileSystems.remove(tag)
+      }
+    }
+  }
+
+  test(
+    "legacy partial segment commit is retained in a separate non-submittable recovery receipt"
+  ) {
+    withDirectory { root =>
+      val storage = localStorage(root)
+      val source = fixture(root, storage)
+      val config = BackfillConfig(storageProperties = storage, batchSize = 2)
+      val receiptPath = root.resolve("result.json.recovery.json")
+      var receipts = 0
+      val outcome = MilvusBackfill.runPrepared(
+        inputFrame.withColumnRenamed("pk", "id"),
+        source.snapshot.toString,
+        config,
+        10L,
+        "source",
+        beforeWrite = () => {
+          addConcurrentStat(storage, "fixture/segment-32"); ()
+        },
+        snapshotAdapter = BackfillSnapshotAdapter.V3Only,
+        onResult =
+          _ => fail("partial output must never reach the success callback"),
+        onRecovery = recovery => {
+          receipts += 1
+          BackfillStorage
+            .writeResolvedRecoveryJson(recovery, receiptPath.toString, config)
+            .fold(error => fail(error.message, error.cause.orNull), identity)
+        }
+      )
+      val error = outcome.left.toOption.get
+      assert(error.stage == "write" && error.cleanupComplete.contains(true))
+      val recovery = error.recovery.get
+      assert(!recovery.result.success && recovery.failedSegmentIds == Seq(32L))
+      assert(recovery.result.segmentResults.keySet == Set(31L))
+      val completed = recovery.result.segmentResults(31L)
+      assert(
+        completed.committedVersion == 2L && completed.sourceVersion.contains(1L)
+      )
+      assert(completed.sourceRowCount == 3L && completed.rowCount == 3L)
+      assert(receipts == 1 && Files.readString(receiptPath) == recovery.toJson)
+      val json = mapper.readTree(Files.readString(receiptPath))
+      assert(json.get("kind").asText() == "backfill-recovery-v1")
+      assert(!json.get("complete").asBoolean())
+      assert(!json.get("completedResult").get("success").asBoolean())
+      assert(!Files.exists(root.resolve("result.json")))
+      assertRows(read(storage, source, None), None)
+      assertConcurrentStat(
+        storage,
+        SegmentBackfillResult(
+          32L,
+          3L,
+          Seq("fixture/segment-32"),
+          "fixture/segment-32",
+          0L,
+          committedVersion = 2L
+        )
+      )
+    }
+  }
+
+  test(
+    "authoritative Avro row count mismatch fails before any segment commit"
+  ) {
+    withDirectory { root =>
+      val storage = localStorage(root)
+      val source = fixture(root, storage)
+      Files.write(
+        root.resolve("fixture/31.avro"),
+        BackfillNativeFixture.encode(
+          SnapshotSegmentEntry(31L, 21L, 2L, 4L, 3L, Seq.empty, Seq.empty)
+        )
+      )
+      val before = manifestBytes(root)
+      val outcome = MilvusBackfill.run(
+        inputFrame.withColumnRenamed("pk", "id"),
+        source.snapshot.toString,
+        BackfillConfig(storageProperties = storage)
+      )
+      assert(outcome.isLeft)
+      assert(
+        outcome.left.toOption.get.message.contains("physical") ||
+          outcome.left.toOption.get.message.contains("Physical")
+      )
+      assert(manifestBytes(root) == before)
+    }
+  }
+
+  Seq("legacy", "manifest-delta-v1").foreach { capability =>
+    test(
+      s"$capability keeps deleted physical rows and excludes L0 from output while visible readback stays deleted"
+    ) {
+      withDirectory { root =>
+        val fixturePath = Paths
+          .get(
+            getClass
+              .getResource("/read-fixtures/collections/nearest/snapshot.json")
+              .toURI
+          )
+          .getParent
+        val paths = Files.walk(fixturePath)
+        try
+          paths.iterator().asScala.foreach { path =>
+            val target = root.resolve(fixturePath.relativize(path))
+            if (Files.isDirectory(path)) Files.createDirectories(target)
+            else Files.copy(path, target)
+          }
+        finally paths.close()
+        val storage = localStorage(root)
+        Files.write(
+          root.resolve("l0.avro"),
+          BackfillNativeFixture.encode(
+            SnapshotSegmentEntry(
+              99L,
+              20L,
+              1L,
+              0L,
+              3L,
+              Seq.empty,
+              Seq.empty,
+              channelName = "backfill-fixture-channel"
+            )
+          )
+        )
+        // The L0 manifest references the same pinned deletion artifact. Its
+        // column files must never become a backfill data segment.
+        val l0Base = "files/insert_log/10/20/99"
+        Files.createDirectories(root.resolve(s"$l0Base/_metadata"))
+        Files.copy(
+          root.resolve("files/insert_log/10/20/30/_metadata/manifest-2.avro"),
+          root.resolve(s"$l0Base/_metadata/manifest-2.avro")
+        )
+        Files.createDirectories(root.resolve(s"$l0Base/_delta"))
+        Files.copy(
+          root.resolve("files/insert_log/10/20/30/_delta/delete.parquet"),
+          root.resolve(s"$l0Base/_delta/delete.parquet")
+        )
+        val l0Item = ManifestItemJson(
+          99L,
+          mapper
+            .createObjectNode()
+            .put("ver", 2L)
+            .put("base_path", l0Base)
+            .toString
+        )
+        val snapshot = root.resolve("snapshot.json")
+        val document = mapper
+          .readTree(Files.readAllBytes(snapshot))
+          .asInstanceOf[ObjectNode]
+        document.withArray("manifest_list").elements().asScala.foreach { item =>
+          val path = root.resolve(item.asText())
+          Files.write(
+            path,
+            BackfillNativeFixture
+              .withChannel(Files.readAllBytes(path), "backfill-fixture-channel")
+          )
+        }
+        document.withArray("manifest_list").add("l0.avro")
+        document
+          .withArray("storagev2_manifest_list")
+          .add(
+            mapper
+              .readTree(SegmentListJson.encodeManifestItems(Seq(l0Item)))
+              .get(0)
+          )
+        Files.writeString(snapshot, document.toString)
+        def readSnapshot(path: String, deletes: Boolean): DataFrame = spark.read
+          .format("milvus")
+          .options(
+            storage ++ Map(
+              "milvus.snapshot.path" -> path,
+              "milvus.read.apply.deletes" -> deletes.toString
+            )
+          )
+          .load()
+          .select("id", "category")
+          .orderBy("id")
+        def values(frame: DataFrame): Seq[(Long, Option[Long])] = frame
+          .collect()
+          .toSeq
+          .map(row =>
+            row.getLong(0) -> Option(row.get(1)).map(_.asInstanceOf[Long])
+          )
+        val physicalBefore = values(readSnapshot("snapshot.json", false))
+        val visibleBefore = values(readSnapshot("snapshot.json", true))
+        val deleted = physicalBefore.map(_._1).toSet -- visibleBefore.map(_._1)
+        assert(
+          physicalBefore.size == 16 && visibleBefore.size == 14 && deleted == Set(
+            3002L,
+            3105L
+          )
+        )
+        val input = spark.createDataFrame(
+          spark.sparkContext.parallelize(physicalBefore.map { case (id, _) =>
+            Row(id, id * 10L)
+          }),
+          StructType(
+            Seq(
+              StructField("id", LongType, false),
+              StructField("category", LongType, false)
+            )
+          )
+        )
+        val result = MilvusBackfill
+          .run(
+            input,
+            snapshot.toString,
+            BackfillConfig(
+              storageProperties = storage,
+              mode = "overwrite",
+              receiverCapability = capability,
+              batchSize = 2
+            )
+          )
+          .fold(error => fail(error.message, error.cause.orNull), identity)
+        assert(
+          result.totalSourceRows == 16 && result.totalRowsWritten == 16 && result.totalMatchedRows == 16
+        )
+        assert(result.segmentResults.keySet == Set(30L, 31L))
+        val committed =
+          if (capability == "manifest-delta-v1") replayDelta(storage, result)
+          else result
+        val items = committed.segmentResults.values.toSeq.map(segment =>
+          ManifestItemJson(
+            segment.segmentId,
+            mapper
+              .createObjectNode()
+              .put("ver", segment.committedVersion)
+              .put("base_path", segment.outputPath)
+              .toString
+          )
+        )
+        document.set[JsonNode](
+          "storagev2_manifest_list",
+          mapper.readTree(SegmentListJson.encodeManifestItems(items :+ l0Item))
+        )
+        Files.writeString(root.resolve("readback.json"), document.toString)
+        val all = values(readSnapshot("readback.json", false))
+        val visible = values(readSnapshot("readback.json", true))
+        assert(all == physicalBefore.map { case (id, _) =>
+          id -> Some(id * 10L)
+        })
+        assert(visible == visibleBefore.map { case (id, _) =>
+          id -> Some(id * 10L)
+        })
+        assert(values(readSnapshot("snapshot.json", false)) == physicalBefore)
+        assert(values(readSnapshot("snapshot.json", true)) == visibleBefore)
+      }
+    }
+  }
+
   private def required(name: String): String = sys.env
     .get(name)
     .filter(_.nonEmpty)
@@ -858,10 +1190,10 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
     )
   private def s3Config: BackfillConfig = BackfillConfig(
     collectionName = "rows",
-    s3Endpoint = required("T11_S3_ENDPOINT"),
-    s3BucketName = required("T11_S3_BUCKET"),
-    s3AccessKey = required("T11_S3_TARGET_ACCESS_KEY"),
-    s3SecretKey = required("T11_S3_TARGET_SECRET_KEY"),
+    s3Endpoint = required("BACKFILL_TEST_S3_ENDPOINT"),
+    s3BucketName = required("BACKFILL_TEST_S3_BUCKET"),
+    s3AccessKey = required("BACKFILL_TEST_S3_TARGET_ACCESS_KEY"),
+    s3SecretKey = required("BACKFILL_TEST_S3_TARGET_SECRET_KEY"),
     s3RootPath = "target/" + UUID.randomUUID().toString,
     batchSize = 2,
     mode = "overwrite"
@@ -922,9 +1254,11 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
       val config = base.copy(
         storageProperties = localStorage(root),
         inputFormat = "iceberg",
-        sourceS3Endpoint = Some(required("T11_S3_ENDPOINT")),
-        sourceS3AccessKey = Some(required("T11_S3_SOURCE_ACCESS_KEY")),
-        sourceS3SecretKey = Some(required("T11_S3_SOURCE_SECRET_KEY")),
+        sourceS3Endpoint = Some(required("BACKFILL_TEST_S3_ENDPOINT")),
+        sourceS3AccessKey =
+          Some(required("BACKFILL_TEST_S3_SOURCE_ACCESS_KEY")),
+        sourceS3SecretKey =
+          Some(required("BACKFILL_TEST_S3_SOURCE_SECRET_KEY")),
         sourceS3UseIam = Some(false),
         sourceS3UseSSL = Some(false),
         sourceS3Region = Some("us-east-1")

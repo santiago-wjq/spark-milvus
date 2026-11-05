@@ -57,22 +57,23 @@ final class InputIdentityNativeTest
 
   override def beforeAll(): Unit = {
     super.beforeAll()
-    val endpoint = required("T11_S3_ENDPOINT")
-    bucket = required("T11_S3_BUCKET")
+    val endpoint = required("BACKFILL_TEST_S3_ENDPOINT")
+    bucket = required("BACKFILL_TEST_S3_BUCKET")
     def identity(name: String): InputStorageBinding = {
       val configuration = new Configuration()
       val prefix = s"fs.s3a.bucket.$bucket."
       configuration.set(prefix + "endpoint", endpoint)
       configuration.set(prefix + "endpoint.region", "us-east-1")
       configuration.set(prefix + "path.style.access", "true")
+      configuration.set(prefix + "bucket.probe", "0")
       configuration.set(prefix + "connection.ssl.enabled", "false")
       configuration.set(
         prefix + "access.key",
-        required(s"T11_S3_${name}_ACCESS_KEY")
+        required(s"BACKFILL_TEST_S3_${name}_ACCESS_KEY")
       )
       configuration.set(
         prefix + "secret.key",
-        required(s"T11_S3_${name}_SECRET_KEY")
+        required(s"BACKFILL_TEST_S3_${name}_SECRET_KEY")
       )
       configuration.set(
         prefix + "aws.credentials.provider",
@@ -93,8 +94,8 @@ final class InputIdentityNativeTest
       .config("spark.ui.enabled", "false")
       .config("spark.driver.host", "127.0.0.1")
       .config("spark.driver.bindAddress", "127.0.0.1")
-      .config(inheritedKey, required("T11_S3_TARGET_ACCESS_KEY"))
-      .config(inheritedSecret, required("T11_S3_TARGET_SECRET_KEY"))
+      .config(inheritedKey, required("BACKFILL_TEST_S3_TARGET_ACCESS_KEY"))
+      .config(inheritedSecret, required("BACKFILL_TEST_S3_TARGET_SECRET_KEY"))
       .config("spark.sql.shuffle.partitions", "2")
       .getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
@@ -110,6 +111,67 @@ final class InputIdentityNativeTest
     .asScala
     .map(entry => entry.getKey -> entry.getValue)
     .toMap
+
+  test(
+    "storage policy rejects unscoped listing and cross-prefix listing or reads"
+  ) {
+    val identities = Seq("source" -> source, "target" -> target)
+    val filesystems = identities.map { case (prefix, identity) =>
+      prefix -> org.apache.hadoop.fs.FileSystem.newInstance(
+        java.net.URI.create(s"s3a://$bucket"),
+        identity.newHadoopConfiguration()
+      )
+    }
+    def directory(prefix: String) =
+      new org.apache.hadoop.fs.Path(s"s3a://$bucket/$prefix/$run/policy")
+    def file(prefix: String) =
+      new org.apache.hadoop.fs.Path(directory(prefix), "value")
+    def denied(operation: => Unit): Unit = {
+      val error = intercept[Exception](operation)
+      val messages = Iterator
+        .iterate[Throwable](error)(_.getCause)
+        .takeWhile(_ != null)
+        .map(e => Option(e.getMessage).getOrElse(""))
+        .mkString(" ")
+        .toLowerCase
+      assert(
+        messages.contains("403") || messages.contains(
+          "accessdenied"
+        ) || messages.contains("access denied")
+      )
+    }
+    try {
+      filesystems.foreach { case (prefix, fs) =>
+        val out = fs.create(file(prefix), true)
+        try out.write(42)
+        finally out.close()
+      }
+      filesystems.foreach { case (prefix, fs) =>
+        val other = if (prefix == "source") "target" else "source"
+        assert(
+          fs.listStatus(directory(prefix)).map(_.getPath.getName).toSeq == Seq(
+            "value"
+          )
+        )
+        val own = fs.open(file(prefix))
+        try assert(own.read() == 42)
+        finally own.close()
+        denied {
+          fs.listStatus(new org.apache.hadoop.fs.Path(s"s3a://$bucket/")); ()
+        }
+        denied { fs.listStatus(directory(other)); () }
+        denied {
+          val input = fs.open(file(other))
+          try { input.read(); () }
+          finally input.close()
+        }
+      }
+    } finally
+      WriterResources.closeAll(
+        null,
+        filesystems.map { case (_, fs) => () => fs.close() }: _*
+      )
+  }
 
   test(
     "same-bucket Parquet inputs retain distinct identities during lazy concurrent and repeated reads"

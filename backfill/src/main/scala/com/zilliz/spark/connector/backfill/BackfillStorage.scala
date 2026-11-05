@@ -57,6 +57,22 @@ object BackfillStorage {
       result: BackfillResult,
       rawOutputPath: String,
       config: BackfillConfig
+  ): Either[BackfillError, Unit] =
+    writeResolvedJson(result.toJson, rawOutputPath, config)
+
+  /** Recovery evidence has its own envelope and is never a submission result.
+    */
+  def writeResolvedRecoveryJson(
+      recovery: BackfillRecovery,
+      rawOutputPath: String,
+      config: BackfillConfig
+  ): Either[BackfillError, Unit] =
+    writeResolvedJson(recovery.toJson, rawOutputPath, config)
+
+  private def writeResolvedJson(
+      json: String,
+      rawOutputPath: String,
+      config: BackfillConfig
   ): Either[BackfillError, Unit] = {
     try {
       val (properties, key) = location(rawOutputPath, config)
@@ -64,7 +80,7 @@ object BackfillStorage {
         NativeObjectStore.Factory(properties).open()
       )
       WriterResources.closing(store.close()) {
-        store.write(key, result.toJson.getBytes(StandardCharsets.UTF_8))
+        store.write(key, json.getBytes(StandardCharsets.UTF_8))
       }
       Right(())
     } catch {

@@ -6,7 +6,10 @@ import org.apache.spark.storage.StorageLevel
 import org.slf4j.LoggerFactory
 
 import com.zilliz.milvus.storage.credential.StorageProperties
-import com.zilliz.milvus.storage.manifest.SnapshotSegmentReader
+import com.zilliz.milvus.storage.manifest.{
+  SnapshotSegmentEntry,
+  SnapshotSegmentReader
+}
 import com.zilliz.milvus.storage.path.StoragePath
 import com.zilliz.milvus.storage.schema.SchemaMapper
 import com.zilliz.milvus.storage.snapshot.json.{
@@ -290,7 +293,9 @@ object MilvusBackfill {
       backfillDataPath: String,
       snapshotPath: String,
       initialConfig: BackfillConfig,
-      snapshotAdapter: BackfillSnapshotAdapter = BackfillSnapshotAdapter.V3Only
+      snapshotAdapter: BackfillSnapshotAdapter = BackfillSnapshotAdapter.V3Only,
+      onResult: BackfillResult => BackfillResult = identity,
+      onRecovery: BackfillRecovery => Unit = _ => ()
   ): Either[BackfillError, BackfillResult] = {
     val validatedConfig = validateConfig(spark, initialConfig) match {
       case Left(error)   => return Left(error)
@@ -313,7 +318,8 @@ object MilvusBackfill {
         expectedSnapshot = None,
         beforeWrite = () => (),
         snapshotAdapter = snapshotAdapter,
-        onResult = identity
+        onResult = onResult,
+        onRecovery = onRecovery
       )
     }
   }
@@ -345,7 +351,8 @@ object MilvusBackfill {
         expectedSnapshot = None,
         beforeWrite = () => (),
         snapshotAdapter = BackfillSnapshotAdapter.V3Only,
-        onResult = identity
+        onResult = identity,
+        onRecovery = _ => ()
       )
     }
   }
@@ -417,8 +424,9 @@ object MilvusBackfill {
     * names. beforeWrite runs after validation, immediately before writing.
     * onResult runs once on the driver after successful computation, before
     * owned resources close. It can durably record and return the result;
-    * failures in it or subsequent cleanup still fail the operation. Neither
-    * callback is serialized into Spark tasks.
+    * failures in it or subsequent cleanup still fail the operation. onRecovery
+    * receives incomplete segment outcomes before cleanup without invoking
+    * onResult. Driver callbacks are never serialized into Spark tasks.
     */
   def runPrepared(
       spark: SparkSession,
@@ -430,7 +438,8 @@ object MilvusBackfill {
       expectedSnapshotName: String,
       beforeWrite: () => Unit,
       snapshotAdapter: BackfillSnapshotAdapter,
-      onResult: BackfillResult => BackfillResult
+      onResult: BackfillResult => BackfillResult,
+      onRecovery: BackfillRecovery => Unit
   ): Either[BackfillError, BackfillResult] =
     runInternal(
       spark,
@@ -441,7 +450,8 @@ object MilvusBackfill {
       expectedSnapshot = Some(expectedCollectionId -> expectedSnapshotName),
       beforeWrite = beforeWrite,
       snapshotAdapter = snapshotAdapter,
-      onResult = onResult
+      onResult = onResult,
+      onRecovery = onRecovery
     )
 
   /** Borrow a caller's resolved Spark plan without reopening or closing its
@@ -456,7 +466,8 @@ object MilvusBackfill {
       expectedSnapshotName: String,
       beforeWrite: () => Unit,
       snapshotAdapter: BackfillSnapshotAdapter,
-      onResult: BackfillResult => BackfillResult
+      onResult: BackfillResult => BackfillResult,
+      onRecovery: BackfillRecovery => Unit
   ): Either[BackfillError, BackfillResult] = {
     if (input == null || input.isStreaming)
       return Left(
@@ -471,7 +482,8 @@ object MilvusBackfill {
       expectedSnapshot = Some(expectedCollectionId -> expectedSnapshotName),
       beforeWrite = beforeWrite,
       snapshotAdapter = snapshotAdapter,
-      onResult = onResult
+      onResult = onResult,
+      onRecovery = onRecovery
     )
   }
 
@@ -484,7 +496,8 @@ object MilvusBackfill {
       expectedSnapshot: Option[(Long, String)],
       beforeWrite: () => Unit,
       snapshotAdapter: BackfillSnapshotAdapter,
-      onResult: BackfillResult => BackfillResult
+      onResult: BackfillResult => BackfillResult,
+      onRecovery: BackfillRecovery => Unit
   ): Either[BackfillError, BackfillResult] = {
     val startTime = System.currentTimeMillis()
     val runConfig = config
@@ -528,7 +541,12 @@ object MilvusBackfill {
         case Left(error)     => return Left(error)
         case Right(segments) => segments
       }
-    val (additionalSegments, authoritativePartitions, deleteOnlySegments) =
+    val (
+      additionalSegments,
+      authoritativePartitions,
+      deleteOnlySegments,
+      expectedRows
+    ) =
       loaded
     val physicalSnapshot = snapshotMetadata.copy(storageV2ManifestList =
       snapshotMetadata.storageV2ManifestList.map(
@@ -739,6 +757,11 @@ object MilvusBackfill {
       // V2 uses packed parquet. V3 keeps the exact snapshot revision for
       // legacy CAS; delta output leaves the current revision to DataCoord.
 
+      require(
+        segmentToPartitionMap.keySet == expectedRows.keySet,
+        "Backfill read/write descriptors must cover every non-L0 snapshot segment"
+      )
+      BackfillSegmentWrite.validatePhysicalRows(joinedDF, expectedRows)
       beforeWrite()
       val segmentResults = BackfillSegmentWrite.write(
         spark,
@@ -751,8 +774,45 @@ object MilvusBackfill {
         runConfig,
         newFieldNames,
         collectionSchema,
-        targetVectorFields
+        targetVectorFields,
+        expectedRows
       ) match {
+        case Left(error: PartialWriteError) =>
+          val partial = BackfillResult
+            .success(
+              error.completedSegments,
+              System.currentTimeMillis() - startTime,
+              collectionID,
+              resolveResultPartitionId(segmentToPartitionMap.values.toSet),
+              snapshotMetadata.collection.schema.version,
+              newFieldNames,
+              totalBackfillDataRows = backfillRowCount
+            )
+            .copy(success = false, inputSnapshotId = inputSnapshotId)
+          val recovery = BackfillRecovery(partial, error.failedSegmentIds)
+          try onRecovery(recovery)
+          catch {
+            case publication: Exception =>
+              error.cause
+                .filter(_ ne publication)
+                .foreach(publication.addSuppressed)
+              return Left(
+                BackfillExecutionError(
+                  "publish-recovery",
+                  s"Failed to publish recovery receipt: ${publication.getMessage}",
+                  Some(publication),
+                  Some(recovery)
+                )
+              )
+          }
+          return Left(
+            BackfillExecutionError(
+              "write",
+              error.message,
+              error.cause,
+              Some(recovery)
+            )
+          )
         case Left(error)    => return Left(error)
         case Right(results) => results
       }
@@ -771,7 +831,17 @@ object MilvusBackfill {
         totalBackfillDataRows = backfillRowCount
       )
 
-      Right(onResult(result.copy(inputSnapshotId = inputSnapshotId)))
+      try Right(onResult(result.copy(inputSnapshotId = inputSnapshotId)))
+      catch {
+        case publication: Exception =>
+          Left(
+            BackfillExecutionError(
+              "publish-result",
+              s"Failed to publish result: ${publication.getMessage}",
+              Some(publication)
+            )
+          )
+      }
 
     }
     withCleanup(
@@ -796,6 +866,7 @@ object MilvusBackfill {
     var outcome: Either[BackfillError, A] = null
     var primary: Throwable = null
     var suppressedBefore = 0
+    var cleanupSucceeded = false
     try {
       try {
         outcome = operation
@@ -805,18 +876,47 @@ object MilvusBackfill {
           suppressedBefore = primary.getSuppressed.length
         }
       } catch {
-        case error: Throwable => primary = error; throw error
+        case error: Throwable =>
+          primary = error; suppressedBefore = error.getSuppressed.length;
+          throw error
       } finally {
-        WriterResources.closeAll(primary, releases: _*)
+        cleanupSucceeded = true
+        WriterResources.closeAll(
+          primary,
+          releases.map { release => () =>
+            try release()
+            catch {
+              case failure: Throwable => cleanupSucceeded = false; throw failure
+            }
+          }: _*
+        )
         if (
           outcome != null && outcome.isLeft && primary.getSuppressed.length > suppressedBefore
         )
           outcome =
             outcome.left.map(error => BackfillError.withCause(error, primary))
       }
-      outcome
+      outcome.left.map(error =>
+        BackfillError.withCleanupStatus(error, cleanupSucceeded)
+      )
     } catch {
-      case error: Exception => Left(BackfillError.fromException(error))
+      case error: Exception =>
+        if (outcome != null && outcome.isRight)
+          Left(
+            BackfillExecutionError(
+              "cleanup",
+              s"Failed to release backfill resources: ${error.getMessage}",
+              Some(error),
+              cleanupComplete = Some(false)
+            )
+          )
+        else
+          Left(
+            BackfillError.withCleanupStatus(
+              BackfillError.fromException(error),
+              cleanupSucceeded
+            )
+          )
     }
   }
 
@@ -1460,7 +1560,7 @@ object MilvusBackfill {
       snapshotAdapter: BackfillSnapshotAdapter
   ): Either[
     BackfillError,
-    (BackfillAdditionalSegments, Map[Long, Long], Set[Long])
+    (BackfillAdditionalSegments, Map[Long, Long], Set[Long], Map[Long, Long])
   ] = {
     try {
       val formatVersion = snapshotFormatVersion(metadata)
@@ -1472,7 +1572,9 @@ object MilvusBackfill {
             ) && metadata.allSegments.isEmpty,
           "Backfill requires complete snapshot segment Avro records"
         )
-        return Right((BackfillAdditionalSegments.Empty, Map.empty, Set.empty))
+        return Right(
+          (BackfillAdditionalSegments.Empty, Map.empty, Set.empty, Map.empty)
+        )
       }
       // The Avro manifests and parquet footers are read through the native
       // store the fs.* options describe (the main bucket, IAM or static
@@ -1487,7 +1589,7 @@ object MilvusBackfill {
         config.targetStorageOptions.getOrElse(StorageProperties.BucketName, "")
       val endpoint =
         config.targetStorageOptions.getOrElse(StorageProperties.Address, "")
-      val (loaded, partitions, deleteOnly) =
+      val (loaded, partitions, deleteOnly, expectedRows) =
         WriterResources.closing(store.close()) {
           val entries = metadata.manifestList.map { path =>
             val located = StoragePath.parseMilvus(path, bucket, endpoint)
@@ -1528,21 +1630,47 @@ object MilvusBackfill {
             "Snapshot V3 manifests must refer to Storage V3 segment Avro records"
           )
           val resolved = snapshotAdapter.resolve(entries, store, config)
+          validateAdapterCoverage(entries, resolved.partitions)
           (
             resolved,
             entries.map(e => e.segmentId -> e.partitionId).toMap,
-            entries.filter(_.segmentLevel == 1L).map(_.segmentId).toSet
+            entries.filter(_.segmentLevel == 1L).map(_.segmentId).toSet,
+            entries
+              .filter(_.segmentLevel != 1L)
+              .map(e => e.segmentId -> e.numOfRows)
+              .toMap
           )
         }
-      Right((loaded, partitions, deleteOnly))
+      Right((loaded, partitions, deleteOnly, expectedRows))
     } catch {
       case e: Exception =>
         Left(
           SchemaValidationError(
-            s"Failed to load snapshot segments: ${e.getMessage}"
+            s"Failed to load snapshot segments: ${e.getMessage}",
+            Some(e)
           )
         )
     }
+  }
+
+  /** Require one authoritative descriptor for every non-V3 data segment. */
+  private[backfill] def validateAdapterCoverage(
+      entries: Seq[SnapshotSegmentEntry],
+      additionalPartitions: Map[Long, Long]
+  ): Unit = {
+    val data = entries.filter(_.segmentLevel != 1L)
+    require(
+      data.forall(_.numOfRows >= 0L),
+      "Snapshot data segment has a negative physical row count"
+    )
+    val expected = data
+      .filter(_.storageVersion != 3L)
+      .map(e => e.segmentId -> e.partitionId)
+      .toMap
+    require(
+      additionalPartitions == expected,
+      "Snapshot adapter must cover every non-V3, non-L0 segment with its authoritative partition"
+    )
   }
 
   /** Load the required snapshot, reporting read and parse failures. */

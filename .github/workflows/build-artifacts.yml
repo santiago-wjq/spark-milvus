@@ -42,6 +42,10 @@ jobs:
           java-version: '21'
           cache: sbt
       - uses: sbt/setup-sbt@v1
+      - name: Bind candidate coordinates to the producing run
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: python3 scripts/ci/candidate_identity.py --version "$RELEASE_VERSION"
       - name: Export the authoritative JVM matrix
         run: sbt 'exportBuildMatrix build-matrix.json'
       - id: plan
@@ -49,6 +53,7 @@ jobs:
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
           python3 scripts/release.py plan --version "$RELEASE_VERSION" --matrix build-matrix.json --output plan.json
+          python3 scripts/release.py check-unused --plan plan.json
           python3 - <<'PY'
           import json, os
           plan = json.load(open('plan.json'))

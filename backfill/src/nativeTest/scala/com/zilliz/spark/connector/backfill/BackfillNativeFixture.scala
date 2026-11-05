@@ -6,8 +6,13 @@ import scala.jdk.CollectionConverters._
 
 import org.apache.arrow.memory.RootAllocator
 import org.apache.arrow.vector.VectorSchemaRoot
-import org.apache.avro.generic.{GenericData, GenericDatumWriter, GenericRecord}
-import org.apache.avro.io.EncoderFactory
+import org.apache.avro.generic.{
+  GenericData,
+  GenericDatumReader,
+  GenericDatumWriter,
+  GenericRecord
+}
+import org.apache.avro.io.{DecoderFactory, EncoderFactory}
 import org.apache.avro.Schema
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.types.StructType
@@ -80,9 +85,25 @@ private[backfill] object BackfillNativeFixture {
     record.put("segment_level", entry.segmentLevel)
     record.put("num_of_rows", entry.numOfRows)
     record.put("storage_version", entry.storageVersion)
+    record.put("channel_name", entry.channelName)
+    encodeRecord(record)
+  }
+
+  def withChannel(bytes: Array[Byte], channel: String): Array[Byte] = {
+    val schema = SnapshotSegmentSchema.schemaFor(4)
+    val record = new GenericDatumReader[GenericRecord](schema).read(
+      null,
+      DecoderFactory.get().binaryDecoder(bytes, null)
+    )
+    record.put("channel_name", channel)
+    encodeRecord(record)
+  }
+
+  private def encodeRecord(record: GenericRecord): Array[Byte] = {
     val bytes = new ByteArrayOutputStream()
     val encoder = EncoderFactory.get().directBinaryEncoder(bytes, null)
-    new GenericDatumWriter[GenericRecord](schema).write(record, encoder)
+    new GenericDatumWriter[GenericRecord](record.getSchema)
+      .write(record, encoder)
     encoder.flush()
     bytes.toByteArray
   }

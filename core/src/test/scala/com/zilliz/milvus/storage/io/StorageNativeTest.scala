@@ -84,6 +84,30 @@ class StorageNativeTest
     }
   }
 
+  test(
+    "business writes create missing local parents through the same native session"
+  ) {
+    assume(available, "libmilvus-storage-jni is not on this machine")
+    val store = new NativeWritableObjectStore(
+      NativeObjectStore
+        .Factory(
+          Map(
+            "fs.storage_type" -> "local",
+            "fs.root_path" -> root.toString
+          )
+        )
+        .open()
+    )
+    try {
+      val payload = "result".getBytes(StandardCharsets.UTF_8)
+      store.write("new/nested/result.json", payload)
+      store.readAll("new/nested/result.json") shouldBe payload
+      Files.readAllBytes(
+        root.resolve("new/nested/result.json")
+      ) shouldBe payload
+    } finally store.close()
+  }
+
   test("a ranged read does not fetch the whole file") {
     withFs { fs =>
       val key = "ranged.bin"

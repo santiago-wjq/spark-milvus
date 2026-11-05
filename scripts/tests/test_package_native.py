@@ -260,6 +260,7 @@ class PackageNativeTest(unittest.TestCase):
         self.compile("libcompute.so", "extern int plugin(void); int host_callback(void) { return 9; } int engine(void) { return plugin(); }",
                      dependencies=("libpluginv1.so",))
         self.metadata["with_plugin"] = True
+        self.metadata["parentProviders"] = {"libpluginv1.so": "libcompute.so"}
         self.record_provenance()
 
         self.package()
@@ -272,7 +273,7 @@ class PackageNativeTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "System ABI library must not be bundled: libz.so.1"):
             self.package()
 
-    def test_standalone_plugin_relocation_does_not_replace_jvm_load_policy(self):
+    def test_unresolved_plugin_blocks_packaging_even_when_jvm_loads_pass(self):
         self.compile("libpluginv1.so", "extern int missing_callback(void); int plugin(void) { return missing_callback(); }")
         self.compile("libpluginv2.so", "int second_plugin(void) { return 5; }")
         self.compile("libcompute.so", "int unrelated(void) { return 9; }")
@@ -281,10 +282,11 @@ class PackageNativeTest(unittest.TestCase):
 
         standalone = PACKAGE_NATIVE.command("ldd", "-r", str(self.libraries / "libpluginv1.so"))
         self.assertIn("undefined symbol: missing_callback", standalone)
-        self.package()
-        self.assertTrue(self.output.is_file())
+        with self.assertRaisesRegex(ValueError, "relocation audit failed"):
+            self.package()
+        self.assertFalse(self.output.exists())
 
-    def test_underlinked_standalone_library_can_package_when_both_jvm_orders_load(self):
+    def test_underlinked_standalone_library_cannot_package_when_both_jvm_orders_load(self):
         self.compile("libother-plugin.so", "extern int host_callback(void); int plugin(void) { return host_callback(); }")
         self.compile("libcompute.so", "int host_callback(void) { return 9; }")
         self.record_provenance()
@@ -292,8 +294,9 @@ class PackageNativeTest(unittest.TestCase):
         standalone = PACKAGE_NATIVE.command("ldd", "-r", str(self.libraries / "libother-plugin.so"))
         self.assertIn("undefined symbol: host_callback", standalone)
         self.stop_jvm_load_mock()
-        self.package()
-        self.assertTrue(self.output.is_file())
+        with self.assertRaisesRegex(ValueError, "relocation audit failed"):
+            self.package()
+        self.assertFalse(self.output.exists())
 
     def test_absolute_dependency_search_path_is_rejected(self):
         self.compile(

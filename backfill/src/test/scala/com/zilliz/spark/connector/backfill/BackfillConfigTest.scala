@@ -728,7 +728,6 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     config.s3Region shouldBe "us-east-1"
     config.s3CloudProvider shouldBe "aws"
     config.batchSize shouldBe 1024
-    config.customOutputPath shouldBe None
   }
 
   // ============ getMilvusReadOptions Tests ============
@@ -789,65 +788,6 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     val options = config.getMilvusReadOptions
 
     options should not contain key("milvus.partition.name")
-  }
-
-  // ============ getS3WriteOptions Tests ============
-
-  test("getS3WriteOptions returns correct options with default output path") {
-    val config = BackfillConfig(
-      collectionName = "test_collection",
-      s3Endpoint = "localhost:9000",
-      s3BucketName = "test-bucket",
-      s3AccessKey = "access123",
-      s3SecretKey = "secret456",
-      s3RootPath = "files",
-      s3Region = "us-west-2",
-      s3CloudProvider = "aliyun",
-      s3UseSSL = true,
-      batchSize = 2048
-    )
-
-    val options = config.getS3WriteOptions(
-      collectionId = 123L,
-      partitionId = 456L,
-      segmentId = 789L
-    )
-
-    options("fs.storage_type") shouldBe "remote"
-    options("fs.address") shouldBe "localhost:9000"
-    options("fs.bucket_name") shouldBe "test-bucket"
-    options("fs.root_path") shouldBe "files"
-    options("fs.access_key_id") shouldBe "access123"
-    options("fs.access_key_value") shouldBe "secret456"
-    options("fs.use_ssl") shouldBe "true"
-    options("fs.region") shouldBe "us-west-2"
-    options("fs.cloud_provider") shouldBe "aliyun"
-    // A segment write belongs to the run's job; it names no collection of its
-    // own, which used to become the owner of a job opened for each segment.
-    options should not contain key("milvus.collection.name")
-    options(
-      "milvus.writer.customPath"
-    ) shouldBe "files/insert_log/123/456/789"
-    options("milvus.insertMaxBatchSize") shouldBe "2048"
-  }
-
-  test("getS3WriteOptions uses customOutputPath when set") {
-    val config = BackfillConfig(
-      collectionName = "test_collection",
-      s3Endpoint = "localhost:9000",
-      s3BucketName = "test-bucket",
-      s3AccessKey = "minioadmin",
-      s3SecretKey = "minioadmin",
-      customOutputPath = Some("custom/path/to/output")
-    )
-
-    val options = config.getS3WriteOptions(
-      collectionId = 123L,
-      partitionId = 456L,
-      segmentId = 789L
-    )
-
-    options("milvus.writer.customPath") shouldBe "custom/path/to/output"
   }
 
   // ============ forTest Factory Method Tests ============
@@ -929,7 +869,10 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     resolved.s3RoleArn shouldBe Some("qcs::cam::uin/234567:roleName/data")
     resolved.s3RoleSessionName shouldBe Some("spark-job")
     resolved.s3ExternalId shouldBe Some("tenant-id")
-    Seq(resolved.getMilvusReadOptions, resolved.getS3WriteOptions(1L, 2L, 3L))
+    Seq(
+      resolved.getMilvusReadOptions,
+      resolved.getS3WriteOptionsForBasePath("segment")
+    )
       .foreach { options =>
         options("fs.cloud_provider") shouldBe "tencent"
         options("fs.role_arn") shouldBe "qcs::cam::uin/234567:roleName/data"

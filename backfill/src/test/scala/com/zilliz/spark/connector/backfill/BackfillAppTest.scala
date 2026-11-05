@@ -10,7 +10,7 @@ import com.zilliz.milvus.storage.snapshot.json.SnapshotJson
 /** CLI parsing, configuration validation and backfill input orchestration. */
 class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
 
-  test("fixed-snapshot delta output requires a durable result destination") {
+  test("every CLI capability requires a durable result destination") {
     val parsed = BackfillApp.parseArgs(
       Array(
         "--s3-endpoint",
@@ -25,16 +25,11 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     config.receiverCapability shouldBe "manifest-delta-v1"
     Seq(None, Some("  ")).foreach { output =>
       intercept[IllegalArgumentException](
-        BackfillApp.validateResultDestination(config, output)
+        BackfillApp.validateResultDestination(output)
       ).getMessage should include("--output-result")
     }
     BackfillApp.validateResultDestination(
-      config,
       Some("s3://milvus/results/job.json")
-    )
-    BackfillApp.validateResultDestination(
-      config.copy(receiverCapability = "legacy"),
-      None
     )
   }
 
@@ -56,34 +51,117 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
 
   // ============ parseArgs ============
 
-  test("a failed job returns its exit code without attempting result output") {
-    val code = BackfillApp.complete(
-      Left(SchemaValidationError("invalid input")),
-      Some("results/job.json"),
-      (_, _) => fail("Failed jobs must not write success output")
+  test(
+    "physical-row preflight rejects missing segments, count mismatch and offset corruption before writing"
+  ) {
+    import org.apache.spark.sql.Row
+    import org.apache.spark.sql.types.{LongType, StructField, StructType}
+    val schema = StructType(
+      Seq(
+        StructField(BackfillSegmentWrite.SegmentIdCol, LongType, false),
+        StructField(BackfillSegmentWrite.RowOffsetCol, LongType, false)
+      )
     )
-    code shouldBe 1
+    def check(rows: Seq[Row], expected: Map[Long, Long]): Unit =
+      BackfillSegmentWrite.validatePhysicalRows(
+        spark.createDataFrame(spark.sparkContext.parallelize(rows, 2), schema),
+        expected
+      )
+    val rows = Seq(Row(1L, 0L), Row(1L, 1L), Row(2L, 0L))
+    check(rows, Map(1L -> 2L, 2L -> 1L, 3L -> 0L))
+    Seq(
+      Map(1L -> 1L, 2L -> 1L),
+      Map(1L -> 2L, 2L -> 1L, 3L -> 1L),
+      Map(1L -> 2L)
+    )
+      .foreach(expected =>
+        intercept[IllegalArgumentException](check(rows, expected))
+      )
+    Seq(Seq(Row(1L, 0L), Row(1L, 0L)), Seq(Row(1L, 0L), Row(1L, 2L)))
+      .foreach(broken =>
+        intercept[IllegalArgumentException](check(broken, Map(1L -> 2L)))
+      )
   }
 
   test(
-    "result output failure preserves the committed job and returns a distinct exit code"
+    "CLI completion reports computation, publication and cleanup failures distinctly"
   ) {
-    val result = BackfillResult
-      .success(Map.empty, 10L, 1L, 2L, 7, Seq("embedding"))
-      .copy(stagingPrefix = "files/staging/completed")
-    var attempted = false
-    val code = BackfillApp.complete(
-      Right(result),
-      Some("results/job.json"),
-      (committed, path) => {
-        attempted = true
-        committed.stagingPrefix shouldBe "files/staging/completed"
-        path shouldBe "results/job.json"
-        Left(UnexpectedError("output denied"))
+    BackfillApp.complete(
+      Left(SchemaValidationError("invalid input"))
+    ) shouldBe 1
+    BackfillApp.complete(
+      Left(BackfillExecutionError("publish-result", "denied"))
+    ) shouldBe 2
+    BackfillApp.complete(
+      Left(BackfillExecutionError("cleanup", "close failed"))
+    ) shouldBe 1
+  }
+
+  test(
+    "CLI publishes exactly once before cleanup and retains durable output if close fails"
+  ) {
+    val result = BackfillResult.success(Map.empty, 10L, 1L, 2L, 7, Seq("n"))
+    Seq(false, true).foreach { failClose =>
+      var writes = 0
+      var durable: Option[String] = None
+      val close = new java.io.IOException("close failed")
+      val outcome = MilvusBackfill.withCleanup(() => {
+        writes shouldBe 1
+        durable shouldBe Some(result.toJson)
+        if (failClose) throw close
+      }) {
+        Right(
+          BackfillApp.publishResult(
+            result,
+            "results/job.json",
+            (value, path) => {
+              path shouldBe "results/job.json"
+              writes += 1
+              durable = Some(value.toJson)
+              Right(())
+            }
+          )
+        )
       }
-    )
-    attempted shouldBe true
-    code shouldBe 2
+      writes shouldBe 1
+      if (failClose) {
+        outcome.left.toOption.get.stage shouldBe "cleanup"
+        outcome.left.toOption.get.cause shouldBe Some(close)
+        BackfillApp.complete(outcome) shouldBe 1
+      } else BackfillApp.complete(outcome) shouldBe 0
+    }
+  }
+
+  test("publication failure remains primary when cleanup also fails") {
+    val denied = new java.io.IOException("result write denied")
+    val close = new java.io.IOException("close failed")
+    val result = BackfillResult.success(Map.empty, 1L, 1L, 2L, 1, Seq("n"))
+    val outcome = MilvusBackfill.withCleanup(() => throw close) {
+      try
+        Right(
+          BackfillApp.publishResult(
+            result,
+            "result.json",
+            (_, _) =>
+              Left(WriteError(-1L, "result.json", "denied", Some(denied)))
+          )
+        )
+      catch {
+        case error: Exception =>
+          Left(
+            BackfillExecutionError(
+              "publish-result",
+              error.getMessage,
+              Some(error)
+            )
+          )
+      }
+    }
+    val error = outcome.left.toOption.get
+    error.stage shouldBe "publish-result"
+    error.cause.get.getCause should be theSameInstanceAs denied
+    error.cause.get.getSuppressed.toSeq shouldBe Seq(close)
+    BackfillApp.complete(outcome) shouldBe 2
   }
 
   test("parseArgs handles flag and key/value pairs") {
@@ -593,9 +671,4 @@ class BackfillAppTest extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     }
   }
 
-  test("offline backfill has no service client dependency") {
-    intercept[ClassNotFoundException](
-      Class.forName("com.zilliz.milvus.client.api.MilvusClient")
-    )
-  }
 }

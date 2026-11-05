@@ -34,11 +34,15 @@ SIGNING_FINGERPRINT = "F0004DED15D9C011F344D6A8526AB23093F3D44A"
 REQUIREMENTS = "META-INF/milvus-native/requirements/storage.properties"
 REQUIREMENTS_LIST = "META-INF/milvus-native/requirements.list"
 SDK_PACKAGES = ("io/milvus/client/", "io/milvus/v2/", "io/milvus/param/", "io/milvus/response/")
-SEARCH_PACKAGES = ("io/knowhere/", "com/zilliz/milvus/jni/vector/",
-                   "com/zilliz/milvus/storage/vector/", "com/zilliz/spark/connector/search/",
-                   "com/zilliz/spark/connector/implicits/", "com/zilliz/spark/connector/extensions/")
+# Positive package ownership is shared with compile-time boundary checks.
+PUBLIC_PACKAGES = {}
+for _line in (ROOT / "project/public-packages.txt").read_text().splitlines():
+    if _line.strip() and not _line.startswith("#"):
+        _module, _package = _line.split()
+        PUBLIC_PACKAGES.setdefault(_module, set()).add(_package.replace(".", "/"))
 
-VERSION = re.compile(r"2\.\d+\.\d+(?:-[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*)?")
+
+VERSION = re.compile(r"2\.\d+\.\d+(?:-(?:(?:alpha|beta|rc)\.\d+(?:\.\d+)*|central-test\.\d+))?")
 SHA = re.compile(r"[0-9a-f]{40}")
 
 
@@ -159,7 +163,7 @@ def validate_plan(plan):
     require(plan.get("schemaVersion") == 1, "Unsupported release plan schema")
     version = plan.get("version", "")
     require(VERSION.fullmatch(version) and not version.upper().endswith("SNAPSHOT"),
-            "Release version must be an immutable 2.x version, without SNAPSHOT")
+            "Release version must be an immutable 2.x version with a numeric alpha/beta/rc qualifier, or a Central test")
     require(SHA.fullmatch(plan.get("sourceSha", "")), "Invalid source SHA")
     for name in ("milvus-proto", "milvus-storage"):
         require(SHA.fullmatch(plan.get("pins", {}).get(name, "")), f"Invalid {name} pin")
@@ -283,9 +287,22 @@ def verify_jvm(path, plan):
         verify_storage_requirement(archive, plan)
 
 
-def verify_public_classes(names):
-    require(not any(name.startswith(SEARCH_PACKAGES) for name in names),
-            "Public JAR embeds vector search implementation")
+def verify_public_classes(names, project=None):
+    """Thin modules own every class; reader bundles may also embed declared third parties."""
+    projects = (project,) if project else ("native-runtime", "native-storage", "core", "spark")
+    allowed = set().union(*(PUBLIC_PACKAGES[module] for module in projects))
+    for name in names:
+        if not name.endswith((".class", ".java", ".scala")):
+            continue
+        normalized = (re.sub(r"^(?:milvus-storage/(?:java|scala)/|scalapb/)", "", name)
+                      if name.endswith((".java", ".scala")) else name)
+        package = normalized.rpartition("/")[0]
+        # Parquet's bundled Airlift codecs are a declared third-party dependency.
+        if not project and normalized.startswith("io/airlift/compress/"):
+            continue
+        if project or normalized.startswith(("com/zilliz/", "io/")):
+            require(package in allowed, "Unowned public implementation package: " + package)
+
 
 
 def verify_storage_requirement(archive, plan):
@@ -309,6 +326,7 @@ def verify_sources(path, kind, artifact, inventory):
                                    ("native-runtime", "native-storage", "core", "spark")))
         else:
             return  # Entry/native artifacts document resources; they have no JVM implementation.
+        verify_public_classes(names, inventory[artifact][0] if kind == "thin" else None)
         require(required <= set(names), "Source JAR is missing API sources: " + ", ".join(sorted(required - set(names))))
         require(all(archive.read(name).strip() for name in required), "Source JAR contains empty API sources")
 
@@ -490,13 +508,13 @@ def verify_thin_jar(path, artifact, plan, classes):
                 "Thin JAR embeds the official Milvus SDK")
         own_classes = {name for name in names if name.endswith(".class")}
         require(own_classes, f"Thin JAR is missing implementation classes: {artifact}")
-        verify_public_classes(names)
         # Repeated cross builds may share class names only within the same owner module.
         project = thin_inventory(plan)[artifact][0]
         for name in own_classes:
             require(name not in classes or classes[name] == project,
                     f"Duplicate thin class: {name} in {artifact} and {classes.get(name)}")
             classes[name] = project
+        verify_public_classes(names, project)
         if artifact.startswith("spark-milvus-native-storage_"):
             verify_storage_requirement(archive, plan)
 
@@ -974,6 +992,20 @@ def download_public(candidate, output):
     verify(output)
 
 
+def check_unused(plan):
+    """Only a 404 establishes that a public coordinate is still unused."""
+    validate_plan(plan)
+    for artifact in sorted(expected_artifacts(plan)):
+        path = artifact_path(plan["groupId"], artifact, plan["version"], extension="pom")
+        request = urllib.request.Request(CENTRAL_REPOSITORY + "/" + path, method="HEAD")
+        try:
+            with urllib.request.urlopen(request, timeout=30):
+                raise ValueError("Maven coordinate is already published: " + artifact + ":" + plan["version"])
+        except urllib.error.HTTPError as error:
+            if error.code != 404:
+                raise
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -985,6 +1017,8 @@ def main():
                       help="Versions exportBuildMatrix JSON; release lines have one source of truth")
     plan.add_argument("--thin-only", action="store_true",
                       help="Export a Spark 4.0 thin-only plan for separate module consumption checks")
+    unused = commands.add_parser("check-unused")
+    unused.add_argument("--plan", type=Path, required=True)
     staging = commands.add_parser("stage")
     staging.add_argument("--plan", type=Path, required=True)
     staging.add_argument("--inputs", type=Path, required=True)
@@ -1013,6 +1047,8 @@ def main():
         import_key()
     elif args.command == "plan":
         create_plan(args.version, args.output, args.matrix, thin_only=args.thin_only)
+    elif args.command == "check-unused":
+        check_unused(json.loads(args.plan.read_text()))
     elif args.command == "stage":
         stage(args.plan, args.inputs, args.output)
     elif args.command == "verify":

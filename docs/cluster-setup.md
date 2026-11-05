@@ -4,7 +4,7 @@ Use this guide when moving the [Python and Java demos](../demo/README.md) from
 `local[2]` to a Spark cluster. Its concrete commands target Linux, Spark 4.0.1,
 Scala 2.13 and Java 21, matching the demo launcher. The connector's other Spark
 lines use their own
-[release artifacts](releasing.md#maven-coordinates-and-runtime-requirements).
+[release artifacts](releasing.md#artifact-graph).
 
 Creating the compute environment, submitting a Spark application and reading a
 Milvus snapshot require different permissions. The Spark driver and executors read

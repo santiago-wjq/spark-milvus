@@ -25,12 +25,13 @@ import io.milvus.grpc.schema.{CollectionSchema, FieldSchema}
   * the field id in each column's metadata, which is all the task writer needs
   * to build the Arrow schema and name the columns by field id.
   *
-  * Design: docs/design/projects/spark-milvus/architecture/write.html section 3.
+  * Resolves collection field identities and physical column types for shared
+  * Storage V3 writers without owning a submission or ingestion lifecycle.
   */
 object WriteSchema {
 
   /** The Arrow schema a segment is written with: the declared columns, and the
-    * two system columns when this write makes a new segment (decision 22). A
+    * row identity and timestamp columns when this write makes a new segment. A
     * column is named by its Milvus field id, which is how the manifest line
     * matches them up.
     */

@@ -124,7 +124,8 @@ case class BackfillResult(
       */
     totalUsedDataFileByField: Map[String, Long] = Map.empty,
     /** `{root}/staging/{job}` where the job manifest and marker were written;
-      * what `register` takes. Empty when nothing was committed.
+      * owned by an application wrapping the computation. Empty for standalone
+      * backfill, whose V3 output remains under each snapshot segment base path.
       */
     stagingPrefix: String = "",
     inputSnapshotId: Option[Long] = None

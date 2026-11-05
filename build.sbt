@@ -618,10 +618,11 @@ lazy val gitBranch = {
 // name in the version so snapshots from two checkouts never share coordinates.
 lazy val ReleaseBranch = "(\\d+\\.\\d+)".r
 
-// Migration builds use a new coordinate; explicit releases retain validation.
+// Development snapshots retain branch and architecture isolation. Immutable
+// CI candidates use their run/attempt identity through release.version.
 lazy val connectorVersion = ReleaseArtifacts.requestedVersion.getOrElse(
   gitBranch match {
     case ReleaseBranch(_) => s"2.1.0-$arch-SNAPSHOT"
-    case _                => "2.1.0-migration-SNAPSHOT"
+    case _                => s"2.1.0-$gitBranch-$arch-SNAPSHOT"
   }
 )

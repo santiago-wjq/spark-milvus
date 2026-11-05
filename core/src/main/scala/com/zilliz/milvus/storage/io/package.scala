@@ -5,10 +5,12 @@ package com.zilliz.milvus.storage
   * MilvusStorageProperties until close, and offers readAll, readAt, size, list,
   * exists and a scoped low-level filesystem operation. WritableObjectStore adds
   * file output and cleanup through the same session; NativeWritableObjectStore
-  * borrows its existing filesystem. The upstream binding owns JNI and library
-  * loading. It is a wrapper, not an implementation: the seven cloud backends,
-  * their credential providers and the filesystem itself all live in the C
-  * layer.
+  * borrows its existing filesystem. File writes create parent directories only
+  * for the local backend; remote object writes do not request bucket or
+  * directory creation. Explicit createDir retains the upstream filesystem
+  * semantics. The upstream binding owns JNI and library loading. It is a
+  * wrapper, not an implementation: the seven cloud backends, their credential
+  * providers and the filesystem itself all live in the C layer.
   *
   * A handle is a pointer inside this process. It must never reach an
   * InputPartition, which Spark serializes and ships; partitions carry the

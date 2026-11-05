@@ -185,6 +185,30 @@ def macos_openmp_redirect(references, generators):
             "-c:h", "milvus-common/*:tools.system.package_manager:mode=report"]
 
 
+def dependency_linkage_conf(references, hook, *, conan_os):
+    """Apply reviewed missing link edges in both Conan contexts.
+
+    The hook path is build-local. Its bytes, rather than that incidental path,
+    identify each rebuilt package; the exact recipe guard lives in the hook.
+    """
+    if conan_os != "Linux":
+        return []
+    identity = digest(hook)
+    result = []
+    for package in ("grpc", "opentelemetry-cpp"):
+        if package not in references:
+            continue
+        variables = {"CMAKE_PROJECT_INCLUDE": str(hook.resolve()),
+                     "MILVUS_DEPENDENCY_RECIPE": references[package]}
+        for context in ("h", "b"):
+            for key, value in (
+                    ("tools.cmake.cmaketoolchain:extra_variables", variables),
+                    ("user.spark_milvus:dependency_linkage_sha256", identity),
+                    ("tools.info.package_id:confs", ["user.spark_milvus:dependency_linkage_sha256"])):
+                result.extend(("-c:" + context, package + "/*:" + key + "=" + repr(value)))
+    return result
+
+
 def write_recipe_seed(path, references):
     """Constrain first resolution to reviewed recipes without forcing dependency versions.
 
@@ -221,11 +245,14 @@ def validate_conan_lock(path, references, platform_tools=(), *, transitive_refer
     missing = set(reviewed.values()) - locked
     if missing:
         raise ValueError("Conan lock does not match reviewed transitive recipes: " + ", ".join(sorted(missing)))
-    changed = {reference for reference in locked
-               if reference.split("/", 1)[0] in reviewed
-               and reference != reviewed[reference.split("/", 1)[0]]}
-    if changed:
-        raise ValueError("Conan lock contains unreviewed transitive recipes: " + ", ".join(sorted(changed)))
+    selected = {**reviewed, **references}
+    for section in ("requires", "build_requires"):
+        changed = {value.split("%", 1)[0] for value in lock.get(section, [])
+                   if value.split("/", 1)[0] in selected
+                   and value.split("%", 1)[0] != selected[value.split("/", 1)[0]]}
+        if changed:
+            raise ValueError("Conan lock contains unreviewed recipes in " + section + ": "
+                             + ", ".join(sorted(changed)))
     return lock
 
 
@@ -373,18 +400,8 @@ def build(args, repository, java_home, work, target, profile):
         extension = json.loads(args.components.read_text()) if args.components else {}
         components = extension.get("components", [])
         component_names = [component["name"] for component in components]
-        if (len(set(component_names)) != len(component_names) or "storage" in component_names
-                or any(not re.fullmatch(r"[a-z][a-z0-9-]*", name) for name in component_names)):
-            raise ValueError("External components must have distinct names other than storage")
-        constraints["references"].update(extension.get("references", {}))
-        constraints.setdefault("transitive_references", {}).update(extension.get("transitiveReferences", {}))
-        for key, value in extension.get("versionPolicy", {}).items():
-            if isinstance(value, dict):
-                constraints["version_policy"].setdefault(key, {}).update(value)
-            else:
-                constraints["version_policy"][key] = value
-        constraints["platform_scope"].update(extension.get("platformScope", {}))
-        constraints["static_on"].update(extension.get("staticOn", {}))
+        from component_contract import merge
+        constraints = merge(constraints, extension, profile.read_text())
         storage_pin = storage_revision(repository, args.storage_source, args.storage_revision)
         storage = sources / "milvus-storage"
         source_files = tree_hashes(args.storage_source)
@@ -516,7 +533,10 @@ def build(args, repository, java_home, work, target, profile):
         profiles = ["-pr:h", host_profile, "-pr:b", build_profile,
                     "-c:h", "tools.build:jobs=" + str(args.jobs), "-c:b", "tools.build:jobs=" + str(args.jobs)]
         openmp_generators = work / "openmp-config"
-        options = [*profiles, *macos_openmp_redirect(references, openmp_generators)]
+        linkage_hook = consumer / "DependencyLinkage.cmake"
+        shutil.copy2(repository / "native/build/cmake/DependencyLinkage.cmake", linkage_hook)
+        options = [*profiles, *macos_openmp_redirect(references, openmp_generators),
+                   *dependency_linkage_conf(references, linkage_hook, conan_os=conan_os)]
         for key, value in sorted(extension.get("conanOptions", {}).items()):
             options.extend(("-o:h", key + "=" + str(value)))
         for key, value in sorted(extension.get("conanConf", {}).items()):
@@ -524,6 +544,7 @@ def build(args, repository, java_home, work, target, profile):
         inputs = {"references": references, "transitiveReferences": transitive_references,
                   "hostProfile": host_profile.read_text(),
                   "consumerSha256": digest(consumer / "conanfile.py"),
+                  "dependencyLinkageSha256": digest(linkage_hook),
                   "dependencySelectionSha256": digest(consumer / "dependencies.json"),
                   "components": metadata["components"],
                   "componentOptions": extension.get("conanOptions", {}),

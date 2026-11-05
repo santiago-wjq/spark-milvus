@@ -8,6 +8,14 @@ compiler.cppstd=20
 build_type=Release
 
 [conf]
+# Both reviewed milvus-common versions append this list. The library itself
+# owns atomic operations; consumer package metadata is not a DT_NEEDED edge.
+milvus-common/*:tools.cmake.cmaketoolchain:extra_variables={"COMMON_LINKER_LIBS": "atomic"}
+milvus-common/*:tools.info.package_id:confs=["tools.cmake.cmaketoolchain:extra_variables"]
+# Folly compiles Linux AIO after its recipe removes FindLibAIO.cmake. Link the
+# provider in Folly itself and prevent reuse of packages without that DT_NEEDED.
+folly/*:tools.cmake.cmaketoolchain:extra_variables={"LIBAIO_LIBRARIES": "aio"}
+folly/*:tools.info.package_id:confs=["tools.cmake.cmaketoolchain:extra_variables"]
 tools.build:compiler_executables={"c": "gcc-12", "cpp": "g++-12"}
 # Build capacity is independent of the runner's core count and identifies the package.
 

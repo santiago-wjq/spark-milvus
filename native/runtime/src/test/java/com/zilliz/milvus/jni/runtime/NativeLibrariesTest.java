@@ -250,6 +250,65 @@ public class NativeLibrariesTest {
     }
 
     @Test
+    public void childBindingMustValidateItsOwnContractAfterParentExtraction() throws Exception {
+        Path extraction = temporary.newFolder().toPath();
+        Map<String, byte[]> libraries = libraries();
+        Path storageContracts = temporary.newFolder().toPath();
+        write(storageContracts.resolve("META-INF/milvus-native/requirements.list"), bytes("storage\n"));
+        write(storageContracts.resolve(STORAGE_CONTRACT), bytes(contract()));
+        URLClassLoader parent = new URLClassLoader(new URL[] {
+                storageContracts.toUri().toURL(), jar(manifest(libraries), libraries).toUri().toURL()}, null);
+        classLoaders.add(parent);
+        NativeLibraries.Loader loader = new NativeLibraries.Loader(parent, extraction);
+        NativeLibraries.Bundle prepared = loader.get(parent, "storage").get();
+        Path childContracts = temporary.newFolder().toPath();
+        write(childContracts.resolve("META-INF/milvus-native/requirements.list"), bytes("compute\n"));
+        write(childContracts.resolve("META-INF/milvus-native/requirements/compute.properties"),
+                bytes("format.version=2\nrevision=" + "3".repeat(40) + "\nentry=compute_jni\n"));
+        URLClassLoader child = new URLClassLoader(new URL[] {childContracts.toUri().toURL()}, parent);
+        classLoaders.add(child);
+        UnsatisfiedLinkError error = assertThrows(UnsatisfiedLinkError.class, () -> loader.get(child, "compute"));
+        assertTrue(error.getMessage(), error.getMessage().contains("compute.revision does not match"));
+        assertSame(prepared, loader.get(parent, "storage").get());
+        assertEquals(1, children(extraction));
+    }
+
+    @Test
+    public void laterContractAndMissingExplicitBindingCannotUseCachedBundle() throws Exception {
+        Path extraction = temporary.newFolder().toPath();
+        Path contracts = temporary.newFolder().toPath();
+        write(contracts.resolve("META-INF/milvus-native/requirements.list"), bytes("storage\n"));
+        write(contracts.resolve(STORAGE_CONTRACT), bytes(contract()));
+        Map<String, byte[]> libraries = libraries();
+        URLClassLoader resources = new URLClassLoader(new URL[] {
+                contracts.toUri().toURL(), jar(manifest(libraries), libraries).toUri().toURL()}, null);
+        classLoaders.add(resources);
+        NativeLibraries.Loader loader = new NativeLibraries.Loader(resources, extraction);
+        loader.get(resources, "storage");
+        assertTrue(assertThrows(UnsatisfiedLinkError.class, () -> loader.get(resources, "compute"))
+                .getMessage().contains("contract for binding: compute"));
+        write(contracts.resolve("META-INF/milvus-native/requirements.list"), bytes("storage\ncompute\n"));
+        write(contracts.resolve("META-INF/milvus-native/requirements/compute.properties"),
+                bytes("format.version=2\nrevision=" + "3".repeat(40) + "\nentry=compute_jni\n"));
+        assertTrue(assertThrows(UnsatisfiedLinkError.class, loader::get)
+                .getMessage().contains("compute.revision does not match"));
+        assertEquals(1, children(extraction));
+    }
+
+    @Test
+    public void absenceIsNotCachedWhenBindingResourcesAppearLater() throws Exception {
+        Path classes = temporary.newFolder().toPath();
+        NativeLibraries.Loader loader = loader(temporary.newFolder().toPath(), classes);
+        assertFalse(loader.get().isPresent());
+        Map<String, byte[]> libraries = libraries();
+        write(classes.resolve(PREFIX + "manifest.properties"), bytes(manifest(libraries)));
+        for (Map.Entry<String, byte[]> library : libraries.entrySet()) {
+            write(classes.resolve(PREFIX + library.getKey()), library.getValue());
+        }
+        assertTrue(loader.get().isPresent());
+    }
+
+    @Test
     public void identicalManifestsInTwoJarsAreRejected() throws Exception {
         Map<String, byte[]> libraries = libraries();
         Path extraction = temporary.newFolder().toPath();

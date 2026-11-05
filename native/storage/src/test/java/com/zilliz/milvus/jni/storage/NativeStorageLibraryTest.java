@@ -58,6 +58,18 @@ public class NativeStorageLibraryTest {
         assertTrue(output, output.contains("STORAGE_FAILED_CLOSED"));
     }
 
+    @Test
+    public void cachedInitializationCannotBypassBundleValidation() throws Exception {
+        String output = runProbe(bundle(true), "cached-failure");
+        assertTrue(output, output.contains("Checksum mismatch for libmilvus-storage-jni.so"));
+    }
+
+    @Test
+    public void standaloneInitializationCannotSwitchToALaterBundle() throws Exception {
+        String output = runProbe(bundle(false), "cached-selection");
+        assertTrue(output, output.contains("bundle selection changed after Storage initialization"));
+    }
+
     private String runProbe(Path bundle, String mode, String... options) throws Exception {
         String classpath = location(NativeLibraryLoader.class) + File.pathSeparator
                 + location(NativeLibraries.class) + File.pathSeparator + location(NativeStorageLibrary.class)
@@ -126,7 +138,14 @@ public class NativeStorageLibraryTest {
     }
 
     public static final class Probe {
-        public static void main(String[] arguments) {
+        public static void main(String[] arguments) throws Exception {
+            if (arguments[0].startsWith("cached-")) {
+                // Model a successful prior standalone initialization without
+                // requiring engine binaries in these isolated loader tests.
+                java.lang.reflect.Field loaded = NativeStorageLibrary.class.getDeclaredField("loaded");
+                loaded.setAccessible(true);
+                loaded.setBoolean(null, true);
+            }
             if (arguments[0].equals("unified-same-path")) {
                 System.setProperty("milvus.storage.native.path",
                         NativeLibraries.bundled().get().directory().resolve(".")

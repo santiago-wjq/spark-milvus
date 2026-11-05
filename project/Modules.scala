@@ -140,21 +140,38 @@ object Modules {
   val backfillBoundary: Seq[Setting[_]] = Seq(
     Compile / compile := {
       val forbidden = Seq(
-        "com.zilliz.milvus.client",
-        "com.zilliz.milvus.offline",
         "io.milvus.v2",
         "io.milvus.client",
         "io.grpc",
         "io.milvus.grpc.milvus"
       )
+      val packages = IO
+        .readLines(
+          (ThisBuild / baseDirectory).value / "project" / "public-packages.txt"
+        )
+        .filter(line => line.trim.nonEmpty && !line.startsWith("#"))
+        .map(_.split("\\s+")(1))
       val violations = (Compile / unmanagedSources).value.flatMap { source =>
         val text = IO
           .read(source)
           .replaceAll("(?s)/\\*.*?\\*/", "")
           .replaceAll("(?m)//.*$", "")
-        forbidden
-          .filter(text.contains)
-          .map(reference => s"$source references $reference")
+        // Runtime configuration may name externally provided Hadoop classes.
+        // Ownership applies to statically referenced connector packages.
+        val code =
+          text.replaceAll("(?s)\"\"\".*?\"\"\"|\"(?:\\\\.|[^\"\\\\])*\"", "")
+        val ownedReferences = "\\bcom\\.zilliz\\.[A-Za-z0-9_.]+".r
+          .findAllIn(code)
+          .filterNot(reference =>
+            packages.exists(pkg =>
+              reference == pkg || reference.startsWith(pkg + ".")
+            )
+          )
+          .toSeq
+        (forbidden.filter(text.contains) ++ ownedReferences)
+          .map(reference =>
+            s"$source references an unowned or service package: $reference"
+          )
       }
       require(
         violations.isEmpty,
