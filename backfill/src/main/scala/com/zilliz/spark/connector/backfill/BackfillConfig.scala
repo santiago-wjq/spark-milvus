@@ -34,8 +34,6 @@ import com.zilliz.spark.connector.options.MilvusOption
   *   Native storage provider for the Milvus storage bucket
   * @param batchSize
   *   Batch size for writing data
-  * @param customOutputPath
-  *   Optional custom output path override
   * @param joinKey
   *   Row identity used to match snapshot rows with backfill input rows
   */
@@ -82,7 +80,6 @@ case class BackfillConfig(
 
     // Writer configuration
     batchSize: Int = 1024,
-    customOutputPath: Option[String] = None,
 
     // Optional mapping: parquet column name -> Milvus field name.
     // When set, the backfill parquet is reprojected through this map before
@@ -321,19 +318,6 @@ case class BackfillConfig(
       bucket,
       options
     )
-  }
-
-  /** Get S3 write options as a Map for MilvusV3WriterFactory
-    */
-  def getS3WriteOptions(
-      collectionId: Long,
-      partitionId: Long,
-      segmentId: Long
-  ): Map[String, String] = {
-    val outputPath = customOutputPath.getOrElse(
-      s"$s3RootPath/insert_log/$collectionId/$partitionId/$segmentId"
-    )
-    getS3WriteOptionsForBasePath(outputPath)
   }
 
   /** Get S3 write options using a specific segment base path (e.g., from

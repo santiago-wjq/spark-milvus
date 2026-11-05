@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import jvm_load
 import platforms
-from build import (digest, macos_openmp_redirect, platform_tool_requirements,
+from build import (dependency_linkage_conf, digest, macos_openmp_redirect, platform_tool_requirements,
                    prepare_conan_lock, promote_bundle, replace_requires_section, snapshot_corrosion, validate_conan_lock,
                    validate_locked_graph, write_recipe_seed)
 
@@ -39,6 +39,23 @@ class BuildContextPinTest(unittest.TestCase):
         self.assertTrue(identity.startswith(prefix))
         self.assertEqual(["tools.cmake.cmaketoolchain:extra_variables"], ast.literal_eval(identity[len(prefix):]))
         self.assertEqual("milvus-common/*:tools.system.package_manager:mode=report", mode)
+
+    def test_dependency_linkage_identity_tracks_bytes_not_work_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            first, second = Path(temporary) / "first.cmake", Path(temporary) / "second.cmake"
+            first.write_text("# exact reviewed link implementation\n")
+            second.write_bytes(first.read_bytes())
+            selected = {"grpc": "grpc/1.67.1#reviewed"}
+            a = dependency_linkage_conf(selected, first, conan_os="Linux")
+            b = dependency_linkage_conf(selected, second, conan_os="Linux")
+            identity = lambda options: [value for value in options if "user.spark_milvus:" in value]
+            self.assertEqual(identity(a), identity(b))
+            self.assertEqual([], dependency_linkage_conf(selected, first, conan_os="Macos"))
+            self.assertIn("-c:h", a)
+            self.assertIn("-c:b", a)
+            self.assertIn(str(first), " ".join(a))
+            second.write_text("# changed target links\n")
+            self.assertNotEqual(identity(a), identity(dependency_linkage_conf(selected, second, conan_os="Linux")))
 
     def test_replacements_keep_the_exact_recipe_revision(self):
         section = replace_requires_section({"openssl": "openssl/3.3.2#9f9f"})
@@ -161,10 +178,22 @@ class ConanLockTest(unittest.TestCase):
             prepare_conan_lock(self.source, self.root / "new.lock", self.root / "new.sha256", self.references,
                                transitive_references=transitive)
 
+    def test_build_context_cannot_select_another_reviewed_revision(self):
+        self.record["build_requires"] = ["grpc/1.0#other"]
+        self.source.write_text(json.dumps(self.record))
+        with self.assertRaisesRegex(ValueError, "unreviewed recipes in build_requires"):
+            validate_conan_lock(self.source, self.references)
+
+    def test_host_context_cannot_hide_a_second_direct_revision(self):
+        self.record["requires"].append("grpc/1.0#other")
+        self.source.write_text(json.dumps(self.record))
+        with self.assertRaisesRegex(ValueError, "unreviewed recipes in requires"):
+            validate_conan_lock(self.source, self.references)
+
     def test_seed_entry_cannot_hide_a_different_resolved_transitive_recipe(self):
         self.record["requires"].append("c-ares/2.0#unreviewed")
         self.source.write_text(json.dumps(self.record))
-        with self.assertRaisesRegex(ValueError, "unreviewed transitive recipes"):
+        with self.assertRaisesRegex(ValueError, "unreviewed recipes"):
             validate_conan_lock(self.source, self.references,
                                 transitive_references={"c-ares": "c-ares/1.0#transitive"})
 

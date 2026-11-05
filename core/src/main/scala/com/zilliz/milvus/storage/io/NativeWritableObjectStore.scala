@@ -19,9 +19,10 @@ final class NativeWritableObjectStore(store: NativeObjectStore)
 
   override def write(key: String, data: Array[Byte]): Unit =
     store.withFileSystem(key) { (filesystem, target) =>
-      // Local files need parents; object storage treats this as a no-op.
+      // Object writes do not require directory creation or bucket-wide access.
       val parent = target.lastIndexOf('/')
-      if (parent > 0) filesystem.createDir(target.substring(0, parent), true)
+      if (store.local && parent > 0)
+        filesystem.createDir(target.substring(0, parent), true)
       filesystem.writeFile(target, data)
     }
 

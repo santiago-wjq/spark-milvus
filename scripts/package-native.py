@@ -268,6 +268,16 @@ def package(directory, provenance_path, output, licenses=None, evidence=None):
     validate_provenance(provenance, libraries, aliases)
     current_jvm_loads = check_jvm_loads(directory, output=None, load_entries=load_entries)
     validate_jvm_load_tests(current_jvm_loads, "Current", exact_fields=False, load_entries=load_entries)
+    # Recheck the bytes being packaged, including dependencies that JNI's lazy
+    # symbol resolution can leave unchecked. Declared engine plugins retain
+    # their verified parent-provider context.
+    import stage
+    with tempfile.TemporaryDirectory(prefix="milvus-native-relocations-") as temporary_audit:
+        failures = stage._run_native_diagnostics(
+            directory, tuple(sorted(set(libraries) | set(aliases))), tuple(load_entries), tuple(dlopen_entries),
+            Path(temporary_audit), provenance.get("parentProviders", {}))
+        if failures:
+            raise ValueError("Current native relocation audit failed: " + ", ".join(failures))
     manifest = {"format.version": "2", "platform": platform, "components": ",".join(components),
                 "provenance.sha256": hashlib.sha256(provenance_bytes).hexdigest(),
                 "load.entries": ",".join(load_entries),
@@ -299,7 +309,7 @@ def package(directory, provenance_path, output, licenses=None, evidence=None):
             if evidence is not None:
                 add_directory(archive, evidence, "META-INF/milvus-native/provenance/", EVIDENCE_ENTRIES |
                               {"build/" + name + suffix for name in components
-                               for suffix in ("-source-files.json", "-source-identity.json", "-extension-files.json")})
+                               for suffix in ("-source-files.json", "-source-identity.json", "-extension-files.json", "-cpu-requirements.json")})
         temporary.replace(output)
         output.chmod(0o644)
     finally:

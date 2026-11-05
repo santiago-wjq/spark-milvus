@@ -44,6 +44,22 @@ public final class NativeLibraries {
         return LOADER.get();
     }
 
+    /**
+     * Returns the shared bundle after validating the contracts visible to the
+     * binding's defining loader, even when another loader already extracted it.
+     * The component must have its own contract; a parent's unrelated contract
+     * cannot establish compatibility for this binding.
+     */
+    public static Optional<Bundle> bundled(Class<?> binding, String component) {
+        if (binding == null || binding.getClassLoader() == null) {
+            throw new IllegalArgumentException("A native binding needs a defining class loader");
+        }
+        if (component == null || !component.matches("[a-z][a-z0-9-]*")) {
+            throw new IllegalArgumentException("Invalid native component: " + component);
+        }
+        return LOADER.get(binding.getClassLoader(), component);
+    }
+
     /** An immutable result published only after every library has been verified. */
     public static final class Bundle {
         private final Path directory;
@@ -121,7 +137,7 @@ public final class NativeLibraries {
     static final class Loader {
         private final ClassLoader resources;
         private final Path temporaryRoot;
-        private boolean initialized;
+        private URL origin;
         private Optional<Bundle> result;
         private UnsatisfiedLinkError failure;
 
@@ -131,20 +147,23 @@ public final class NativeLibraries {
         }
 
         synchronized Optional<Bundle> get() {
-            if (!initialized) {
-                try {
-                    result = discover();
-                } catch (IOException | RuntimeException error) {
-                    failure = new UnsatisfiedLinkError("Cannot prepare Milvus native bundle: " + error.getMessage());
-                    failure.initCause(error);
-                }
-                initialized = true;
-            }
-            if (failure != null) throw failure;
-            return result;
+            return get(resources, null);
         }
 
-        private Optional<Bundle> discover() throws IOException {
+        synchronized Optional<Bundle> get(ClassLoader bindingResources, String component) {
+            if (failure != null) throw failure;
+            try {
+                return discover(bindingResources, component);
+            } catch (IOException | RuntimeException error) {
+                UnsatisfiedLinkError wrapped = new UnsatisfiedLinkError(
+                        "Cannot prepare Milvus native bundle: " + error.getMessage());
+                wrapped.initCause(error);
+                if (result == null && bindingResources == resources) failure = wrapped;
+                throw wrapped;
+            }
+        }
+
+        private Optional<Bundle> discover(ClassLoader resources, String component) throws IOException {
             String platform = platform();
             boolean bundleMarkerPresent = resources.getResources(BUNDLE_MARKER).hasMoreElements();
             if (platform == null) {
@@ -155,6 +174,7 @@ public final class NativeLibraries {
             String name = "native/milvus/2/" + platform + "/manifest.properties";
             Enumeration<URL> manifests = resources.getResources(name);
             if (!manifests.hasMoreElements()) {
+                require(result == null, "Native binding cannot see the already extracted bundle");
                 require(!bundleMarkerPresent, "Milvus native bundle is present but has no manifest for " + platform);
                 return Optional.empty();
             }
@@ -170,10 +190,29 @@ public final class NativeLibraries {
                         + " spark.executor.userClassPathFirst=true loads a second copy beside the driver's;"
                         + " leave it unset. Otherwise keep one jar that carries the native bundle on the classpath.");
             }
-            return Optional.of(extract(manifest, platform, temporaryRoot, requirements()));
+            Map<String, Properties> expected = requirements(resources);
+            require(component == null || expected.containsKey(component),
+                    "Missing JVM native component contract for binding: " + component);
+            if (result != null) {
+                require(origin.equals(manifest), "Native binding selects a different bundle from the extracted bundle");
+                Bundle bundle = result.get();
+                validateBindings(bundle.revisions, bundle.loadEntries, platform, expected);
+                return result;
+            }
+            try {
+                result = Optional.of(extract(manifest, platform, temporaryRoot, expected));
+                origin = manifest;
+                return result;
+            } catch (IOException | RuntimeException error) {
+                // Extraction failures remain sticky; a rejected later binding
+                // never invalidates the already verified bundle for its owner.
+                failure = new UnsatisfiedLinkError("Cannot prepare Milvus native bundle: " + error.getMessage());
+                failure.initCause(error);
+                throw failure;
+            }
         }
 
-        private Map<String, Properties> requirements() throws IOException {
+        private Map<String, Properties> requirements(ClassLoader resources) throws IOException {
             Enumeration<URL> lists = resources.getResources(REQUIREMENTS_LIST);
             Set<String> components = new LinkedHashSet<>();
             while (lists.hasMoreElements()) {
@@ -208,6 +247,20 @@ public final class NativeLibraries {
             return expected;
         }
 
+    }
+
+    private static void validateBindings(Map<String, String> revisions, Set<String> entries,
+            String platform, Map<String, Properties> expected) throws IOException {
+        for (Map.Entry<String, Properties> binding : expected.entrySet()) {
+            String component = binding.getKey();
+            require(revisions.containsKey(component), "Native bundle is missing component " + component);
+            String revision = binding.getValue().getProperty("revision");
+            require(revision.equals(revisions.get(component)),
+                    "Native bundle " + component + ".revision does not match JVM bindings: expected "
+                            + revision + ", found " + revisions.get(component));
+            require(entries.contains(libraryName(platform, binding.getValue().getProperty("entry"))),
+                    "Native bundle must declare JVM load entry for " + component);
+        }
     }
 
     private static String platform() {

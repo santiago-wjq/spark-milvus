@@ -91,7 +91,7 @@ class ReleaseTest(unittest.TestCase):
             path = directory / f"{artifact}-{self.plan['version']}{suffix}.jar"
             contents = {"README.md": "fixture"}
             if classifier == "sources":
-                contents.update({name: "source fixture" for names in release.THIN_SOURCES.values() for name in names})
+                contents.update({name: "source fixture" for project, names in release.THIN_SOURCES.items() if project != "backfill" for name in names})
             if not classifier:
                 contents.update({
                                         "com/zilliz/spark/connector/Api.class": b"class fixture",
@@ -129,7 +129,7 @@ class ReleaseTest(unittest.TestCase):
                     path.write_bytes(release.pom_bytes(artifact, self.plan,
                         runtime + [dict(dep, scope="provided") for dep in provided]))
                 else:
-                    contents = {"README.md": "fixture"} if classifier else {f"fixture/{project}/Api.class": b"fixture"}
+                    contents = {"README.md": "fixture"} if classifier else {sorted(release.PUBLIC_PACKAGES[project])[0] + "/Api.class": b"fixture"}
                     if classifier == "sources":
                         contents.update({name: "source fixture" for name in release.THIN_SOURCES[project]})
                     if project == "native-storage" and not classifier:
@@ -251,7 +251,7 @@ class ReleaseTest(unittest.TestCase):
         module = next(item for item in metadata["modules"] if item["projectId"] == "core")
         record = next(item for item in module["files"] if item["classifier"] == "" and item["extension"] == "jar")
         path = directory / record["path"]
-        self.jar(path, {"fixture/core/Api.class": b"changed public core"})
+        self.jar(path, {"com/zilliz/milvus/storage/Api.class": b"changed public core"})
         record.update(sha256=release.digest(path), size=path.stat().st_size)
         release.write_json(directory / "thin-artifacts.json", metadata)
         with self.assertRaisesRegex(ValueError, "Shared thin GAV has different bytes"):
@@ -334,21 +334,33 @@ class ReleaseTest(unittest.TestCase):
             with self.subTest(name=name):
                 self.thin()
                 self.rewrite_thin_export(artifact, lambda path: self.jar(path, {
-                    "fixture/core/Api.class": "fixture", name: "unexpected"}), extension="jar")
+                    "com/zilliz/milvus/storage/Api.class": "fixture", name: "unexpected"}), extension="jar")
                 with self.assertRaisesRegex(ValueError, expected):
                     self.stage()
 
     def test_thin_modules_cannot_duplicate_shared_proto_classes(self):
         self.rewrite_thin_export("spark-milvus-native-storage_2.13", lambda path: self.jar(path, {
-            "fixture/core/Api.class": "duplicate generated schema"}), extension="jar")
+            "com/zilliz/milvus/storage/Api.class": "duplicate generated schema"}), extension="jar")
         with self.assertRaisesRegex(ValueError, "Duplicate thin class"):
             self.stage()
 
-    def test_thin_reader_rejects_search_classes(self):
-        self.rewrite_thin_export("spark-milvus-core_2.13",
-            lambda path: self.jar(path, {"io/knowhere/Knowhere.class": b"fixture"}), extension="jar")
-        with self.assertRaisesRegex(ValueError, "vector search"):
-            self.stage()
+    def test_thin_reader_rejects_unknown_packages_even_after_renaming(self):
+        for name in ("org/example/Unexpected.class", "com/zilliz/milvus/storage/renamed/Engine.class"):
+            with self.subTest(name=name):
+                self.thin()
+                self.rewrite_thin_export("spark-milvus-core_2.13",
+                    lambda path: self.jar(path, {name: b"fixture"}), extension="jar")
+                with self.assertRaisesRegex(ValueError, "Unowned public implementation package"):
+                    self.stage()
+
+    def test_managed_source_roots_preserve_package_ownership(self):
+        release.verify_public_classes(["scalapb/io/milvus/grpc/common/KeyValuePair.scala"], "core")
+        release.verify_public_classes(["milvus-storage/scala/io/milvus/storage/MilvusStorageReader.scala"], "native-storage")
+        for name in ("scalapb/io/milvus/grpc/common/KeyValuePair.class",
+                     "scalapb/org/example/Unknown.scala"):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "Unowned public"):
+                release.verify_public_classes([name], "core")
+
 
     def test_candidate_rechecks_thin_pom_graph_after_rehash(self):
         manifest = self.stage()
@@ -469,7 +481,7 @@ class ReleaseTest(unittest.TestCase):
         manifest = self.stage()
         record = next(item for item in manifest["artifacts"] if item["kind"] == "jvm" and item["extension"] == "pom")
         wrong = release.pom_bytes(record["artifactId"], self.plan, [dict(
-            groupId="com.zilliz", artifactId="native-vector_2.13", version=self.plan["version"])])
+            groupId="com.zilliz", artifactId="unexpected-module_2.13", version=self.plan["version"])])
         self.rewrite_file(manifest, record, wrong)
         with self.assertRaisesRegex(ValueError, "unpublished internal"):
             release.verify(self.output)
@@ -480,8 +492,21 @@ class ReleaseTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "untracked files"):
             release.verify(self.output)
 
+    def test_published_coordinates_and_failed_lookups_block_new_candidates(self):
+        missing = release.urllib.error.HTTPError("https://example.test", 404, "Not Found", {}, None)
+        with mock.patch.object(release.urllib.request, "urlopen", side_effect=missing) as request:
+            release.check_unused(self.plan)
+        self.assertEqual(request.call_count, len(release.expected_artifacts(self.plan)))
+        with mock.patch.object(release.urllib.request, "urlopen", return_value=mock.MagicMock()):
+            with self.assertRaisesRegex(ValueError, "already published"):
+                release.check_unused(self.plan)
+        unavailable = release.urllib.error.HTTPError("https://example.test", 503, "Unavailable", {}, None)
+        with mock.patch.object(release.urllib.request, "urlopen", side_effect=unavailable):
+            with self.assertRaises(release.urllib.error.HTTPError):
+                release.check_unused(self.plan)
+
     def test_snapshot_and_malformed_versions_are_rejected(self):
-        for version in ("2.0.0-SNAPSHOT", "2.0.0-snapshot", "2.0.0/escape", "1.6.1", "2.0.0-"):
+        for version in ("2.0.0-SNAPSHOT", "2.0.0-snapshot", "2.0.0/escape", "1.6.1", "2.0.0-", "2.1.0-migration.4", "2.1.0-ci.123.1"):
             with self.subTest(version=version), self.assertRaisesRegex(ValueError, "immutable 2.x"):
                 release.validate_plan(dict(self.plan, version=version))
 

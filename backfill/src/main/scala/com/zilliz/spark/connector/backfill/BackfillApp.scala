@@ -11,7 +11,7 @@ import org.apache.spark.sql.SparkSession
   * <endpoint> --s3-bucket <bucket> \ --s3-access-key <key> --s3-secret-key
   * <secret> \ [--s3-root-path <path>] [--s3-region <region>]
   * [--s3-cloud-provider aws|aliyun|gcp|azure|tencent|huawei] [--s3-use-ssl] \
-  * [--batch-size <n>] [--output-result <path>] \ [--mode
+  * [--batch-size <n>] --output-result <path> \ [--mode
   * replace|coalesce|overwrite] [--join-key <snapshot-field-name>] \
   * [--input-format parquet|iceberg|lance] \ [--receiver-capability
   * legacy|manifest-delta-v1]
@@ -41,7 +41,7 @@ object BackfillApp {
       throw new IllegalArgumentException("--snapshot is required")
     )
     val baseConfig = buildConfig(parsed)
-    validateResultDestination(baseConfig, parsed.get("output-result"))
+    validateResultDestination(parsed.get("output-result"))
 
     // Surface the default loudly: downstream jobs that omit --mode get
     // fill-if-null. Printing to stderr so it reaches the driver log even when the
@@ -61,58 +61,81 @@ object BackfillApp {
       .getOrCreate()
     val exitCode = Using.resource(spark) { session =>
       session.sparkContext.setLogLevel("WARN")
-      complete(
-        MilvusBackfill.run(session, parquetPath, snapshotPath, baseConfig),
-        parsed.get("output-result"),
-        (result, outputPath) =>
-          BackfillStorage.writeResultJson(
-            session,
-            result,
-            outputPath,
-            baseConfig
-          )
-      )
+      val output = parsed("output-result")
+      val resolved = MilvusBackfill.bindConfig(session, baseConfig)
+      complete(resolved.flatMap { config =>
+        MilvusBackfill.run(
+          session,
+          parquetPath,
+          snapshotPath,
+          baseConfig,
+          onResult = result =>
+            publishResult(
+              result,
+              output,
+              (value, path) =>
+                BackfillStorage.writeResolvedResultJson(value, path, config)
+            ),
+          onRecovery = recovery =>
+            BackfillStorage
+              .writeResolvedRecoveryJson(
+                recovery,
+                output + ".recovery.json",
+                config
+              )
+              .fold(
+                error =>
+                  throw new IllegalStateException(
+                    error.message,
+                    error.cause.orNull
+                  ),
+                identity
+              )
+        )
+      })
     }
     // Exiting inside the resource body would bypass resource cleanup.
     if (exitCode != 0) System.exit(exitCode)
   }
 
-  private[backfill] def complete(
-      outcome: Either[BackfillError, BackfillResult],
-      outputPath: Option[String],
+  /** Called during successful computation, before its owned resources close. */
+  private[backfill] def publishResult(
+      result: BackfillResult,
+      outputPath: String,
       writeResult: (BackfillResult, String) => Either[BackfillError, Unit]
-  ): Int = {
+  ): BackfillResult = {
+    writeResult(result, outputPath).fold(
+      error =>
+        throw new IllegalStateException(error.message, error.cause.orNull),
+      identity
+    )
+    result
+  }
+
+  private[backfill] def complete(
+      outcome: Either[BackfillError, BackfillResult]
+  ): Int =
     outcome match {
       case Right(result) =>
         println(result.summary)
         println(result.segmentSummary)
-        outputPath
-          .map { path =>
-            writeResult(result, path) match {
-              case Right(_) =>
-                println(s"Result JSON written to: $path")
-                0
-              case Left(err) =>
-                System.err.println(
-                  s"Backfill succeeded but writing result JSON FAILED: ${err.message}"
-                )
-                2
-            }
-          }
-          .getOrElse(0)
+        0
       case Left(error) =>
-        System.err.println(s"Backfill FAILED: ${error.message}")
-        1
+        System.err.println(
+          s"Backfill FAILED at ${error.stage}: ${error.message}"
+        )
+        if (
+          error.stage == "publish-result" || error.stage == "publish-recovery"
+        ) 2
+        else 1
     }
-  }
 
   private[backfill] def validateResultDestination(
-      config: BackfillConfig,
       outputPath: Option[String]
   ): Unit =
     require(
-      !config.emitsManifestDelta || outputPath.exists(_.trim.nonEmpty),
-      "--output-result is required for manifest-delta-v1 so the operations can be submitted to DataCoord"
+      outputPath.exists(_.trim.nonEmpty),
+      "--output-result is required to preserve completed or partial backfill recovery records"
     )
 
   // Boolean flags do not consume the next token.

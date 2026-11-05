@@ -362,30 +362,31 @@ class NativeAuditTest(unittest.TestCase):
         self.assertEqual([125, 125], [record["exit"] for record in direct_loads])
         self.assertIn("without the required load markers", stderr.getvalue())
 
-    def test_diagnostic_tool_error_does_not_replace_jvm_acceptance(self):
+    def test_diagnostic_tool_error_blocks_acceptance_and_preserves_jvm_evidence(self):
         self.complete_roots()
         output = self.root / "audit"
 
         with mock.patch.object(stage, "command", side_effect=RuntimeError("diagnostic failed")):
-            loads = stage.audit(
-                self.libraries, sorted(path.name for path in self.libraries.iterdir()),
-                TEST_LOAD, TEST_AUDIT, output,
-            )
+            with self.assertRaisesRegex(ValueError, "Native relocation audit failed"):
+                stage.audit(self.libraries, sorted(path.name for path in self.libraries.iterdir()),
+                            TEST_LOAD, TEST_AUDIT, output)
 
+        loads = json.loads((output / "jvm-load-tests.json").read_text())
         self.assertTrue(all(record["exit"] == 0 for record in loads))
         self.assertEqual("RuntimeError: diagnostic failed\n",
                          (output / "diagnostic-error.txt").read_text())
 
-    def test_unresolved_unloaded_dependency_is_diagnostic_when_both_jvm_orders_pass(self):
+    def test_unresolved_dependency_blocks_acceptance_when_both_jvm_orders_pass(self):
         self.complete_roots()
         self.library(
             "libbroken.so",
             "extern int missing(void); int broken(void) { return missing(); }",
         )
 
-        loads = stage.audit(self.libraries, sorted(path.name for path in self.libraries.iterdir()),
-                            TEST_LOAD, TEST_AUDIT, self.root / "audit")
-
+        with self.assertRaisesRegex(ValueError, "Native relocation audit failed: libbroken.so"):
+            stage.audit(self.libraries, sorted(path.name for path in self.libraries.iterdir()),
+                        TEST_LOAD, TEST_AUDIT, self.root / "audit")
+        loads = json.loads((self.root / "audit/jvm-load-tests.json").read_text())
         result = json.loads((self.root / "audit/results.json").read_text())["libbroken.so"]
         self.assertFalse(result["relocationsPassed"])
         self.assertFalse(result["passed"])

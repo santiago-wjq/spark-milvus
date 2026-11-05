@@ -1,5 +1,7 @@
 """The public example accepts only fixed input and checks results independently."""
 import importlib.util
+import contextlib
+import io
 import json
 from pathlib import Path
 import shutil
@@ -39,6 +41,28 @@ class DemoCommonTest(unittest.TestCase):
                      [dict(expected[0], vector=[99.0, 0.0]), *expected[1:]]):
             with self.subTest(rows=rows), self.assertRaisesRegex(AssertionError, "frozen fixture"):
                 demo.check_fixture_rows(rows, expected)
+
+    def test_session_supplies_fixture_expectations_and_reports_only_success(self):
+        spark = mock.Mock(version="4.0.1")
+        spark.sparkContext.master = "local[2]"
+        sql = mock.Mock()
+        sql.SparkSession.builder.appName.return_value.getOrCreate.return_value = spark
+        with mock.patch.dict(sys.modules, {"pyspark.sql": sql}):
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                with demo.demo_session("Read snapshot", []) as (session, args, options):
+                    self.assertIs(session, spark)
+                    self.assertEqual(len(args.expected_rows), 14)
+                    self.assertEqual(options["milvus.snapshot.path"], "snapshot.json")
+                    demo.check_fixture_rows(args.expected_rows, args.expected_rows)
+            self.assertIn("Demo passed", output.getvalue())
+            spark.stop.assert_called_once()
+            spark.reset_mock()
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                with self.assertRaisesRegex(ValueError, "query failed"):
+                    with demo.demo_session("Read snapshot", []):
+                        raise ValueError("query failed")
+            self.assertNotIn("Demo passed", output.getvalue())
+            spark.stop.assert_called_once()
 
     def test_corrupt_or_missing_fixture_is_rejected_without_repair(self):
         with tempfile.TemporaryDirectory() as directory:

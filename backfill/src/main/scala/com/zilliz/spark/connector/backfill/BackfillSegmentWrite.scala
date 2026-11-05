@@ -4,7 +4,7 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.connector.write.DataWriter
-import org.apache.spark.sql.functions.col
+import org.apache.spark.sql.functions.{col, count, countDistinct, max, min}
 import org.apache.spark.sql.types.{StructField, StructType}
 import org.apache.spark.TaskContext
 import org.slf4j.LoggerFactory
@@ -77,9 +77,10 @@ private[backfill] object BackfillSegmentWrite {
       targetFieldOverrides: Map[
         String,
         StructField
-      ]
+      ],
+      expectedRows: Map[Long, Long]
   ): Either[BackfillError, Map[Long, SegmentBackfillResult]] = {
-
+    var collectedCommits = Map.empty[Long, SegmentBackfillResult]
     try {
       // Prepare data: select only needed columns and add _segment_id for
       // partitioning. Trailing column is the backfill match flag — retained
@@ -164,6 +165,7 @@ private[backfill] object BackfillSegmentWrite {
       val broadcastAdditionalSegments =
         spark.sparkContext.broadcast(additionalSegments)
       val broadcastTargetSchema = spark.sparkContext.broadcast(targetSchema)
+      val broadcastExpectedRows = spark.sparkContext.broadcast(expectedRows)
 
       val results = WriterResources.closing {
         WriterResources.closeAll(
@@ -174,10 +176,11 @@ private[backfill] object BackfillSegmentWrite {
           () => broadcastSegmentBasePathMap.destroy(),
           () => broadcastSegmentSourceVersionMap.destroy(),
           () => broadcastAdditionalSegments.destroy(),
-          () => broadcastTargetSchema.destroy()
+          () => broadcastTargetSchema.destroy(),
+          () => broadcastExpectedRows.destroy()
         )
       } {
-        repartitionedRDD
+        val collected = repartitionedRDD
           .mapPartitions { iter =>
             if (!iter.hasNext) Iterator.empty
             else
@@ -189,33 +192,43 @@ private[backfill] object BackfillSegmentWrite {
                 broadcastSegmentBasePathMap.value,
                 broadcastSegmentSourceVersionMap.value,
                 broadcastAdditionalSegments.value,
-                broadcastTargetSchema.value
+                broadcastTargetSchema.value,
+                broadcastExpectedRows.value
               )
           }
           .collect()
-
+        collectedCommits = collected.collect {
+          case (result, _) if result.rowCount > 0L => result.segmentId -> result
+        }.toMap
+        collected
       }
 
       // Check for failures
       val failures = results.filter(_._2.isDefined)
-      if (failures.nonEmpty) {
-        val firstFailure = failures.head
-        val error = firstFailure._2.get
+      val successfulResults = results.collect {
+        case (result, _) if result.rowCount > 0L => result.segmentId -> result
+      }.toMap
+      val missing =
+        expectedRows.filter(_._2 > 0L).keySet -- results.map(_._1.segmentId)
+      if (failures.nonEmpty || missing.nonEmpty) {
+        val error = failures.headOption
+          .flatMap(_._2)
+          .getOrElse(
+            new IllegalStateException(
+              s"Segments returned no write outcome: ${missing.toSeq.sorted.mkString(",")}"
+            )
+          )
         return Left(
-          WriteError(
-            segmentId = firstFailure._1.segmentId,
-            outputPath = firstFailure._1.outputPath,
+          PartialWriteError(
+            completedSegments = successfulResults,
+            failedSegmentIds =
+              (failures.map(_._1.segmentId).toSeq ++ missing).distinct.sorted,
             message =
-              s"Failed to write ${failures.length} segment(s): ${error.getMessage}",
+              s"Failed to write ${failures.length + missing.size} segment(s): ${error.getMessage}",
             cause = Some(error)
           )
         )
       }
-
-      // Extract successful results
-      val successfulResults = results.map { case (result, _) =>
-        result.segmentId -> result
-      }.toMap
 
       // Log summary statistics
       val totalTime = results.map(_._1.executionTimeMs).sum
@@ -266,6 +279,17 @@ private[backfill] object BackfillSegmentWrite {
     } catch {
       case e: Exception =>
         logger.error("Failed to process segments", e)
+        if (collectedCommits.nonEmpty)
+          return Left(
+            PartialWriteError(
+              collectedCommits,
+              (expectedRows
+                .filter(_._2 > 0L)
+                .keySet -- collectedCommits.keySet).toSeq.sorted,
+              s"Failed after collecting segment commits: ${e.getMessage}",
+              Some(e)
+            )
+          )
         Left(
           SegmentProcessingError(
             segmentId = -1,
@@ -309,7 +333,8 @@ private[backfill] object BackfillSegmentWrite {
       segmentBasePathMap: Map[Long, String],
       segmentSourceVersionMap: Map[Long, Long],
       additionalSegments: BackfillAdditionalSegments,
-      targetSchema: StructType
+      targetSchema: StructType,
+      expectedRows: Map[Long, Long]
   ): Iterator[(SegmentBackfillResult, Option[Throwable])] = {
 
     val firstRow = iter.next()
@@ -317,52 +342,56 @@ private[backfill] object BackfillSegmentWrite {
     val partitionID = segmentToPartitionMap(segmentID)
     val startTime = System.currentTimeMillis()
 
-    val additional = additionalSegments.partitions.contains(segmentID)
-    val outputPath =
-      if (additional)
-        additionalSegments.outputPath(
-          collectionID,
-          partitionID,
-          segmentID,
-          context.storage
-        )
-      else
-        segmentBasePathMap.getOrElse(
-          segmentID,
-          throw new IllegalArgumentException(
-            s"Missing V3 base path for segment $segmentID"
+    var outputPath = ""
+    var writer: DataWriter[InternalRow] = null
+    var committed: Option[SegmentBackfillResult] = None
+    try {
+      val additional = additionalSegments.partitions.contains(segmentID)
+      outputPath =
+        if (additional)
+          additionalSegments.outputPath(
+            collectionID,
+            partitionID,
+            segmentID,
+            context.storage
           )
-        )
-    val writer =
-      if (additional)
-        additionalSegments.writer(
-          collectionID,
-          partitionID,
-          segmentID,
-          targetSchema,
-          context.params,
-          context.storage
-        )
-      else
-        segmentWriter(
-          targetSchema,
-          context.params,
-          context.storage,
-          outputPath,
-          segmentSourceVersionMap.getOrElse(
+        else
+          segmentBasePathMap.getOrElse(
             segmentID,
             throw new IllegalArgumentException(
-              s"Missing snapshot manifest version for segment $segmentID"
+              s"Missing V3 base path for segment $segmentID"
             )
-          ),
-          context.receiverCapability
-        )
+          )
+      writer =
+        if (additional)
+          additionalSegments.writer(
+            collectionID,
+            partitionID,
+            segmentID,
+            targetSchema,
+            context.params,
+            context.storage
+          )
+        else
+          segmentWriter(
+            targetSchema,
+            context.params,
+            context.storage,
+            outputPath,
+            segmentSourceVersionMap.getOrElse(
+              segmentID,
+              throw new IllegalArgumentException(
+                s"Missing snapshot manifest version for segment $segmentID"
+              )
+            ),
+            context.receiverCapability
+          )
 
-    try {
       val counts = writeRows(
         Iterator.single(firstRow) ++ iter,
         targetSchema,
-        context.readsSnapshotFields
+        context.readsSnapshotFields,
+        Some(segmentID -> expectedRows(segmentID))
       )(writer.write)
 
       val commitMessage = writer.commit()
@@ -395,45 +424,85 @@ private[backfill] object BackfillSegmentWrite {
           )
       }
 
-      writer.close()
-
-      Iterator.single(
-        (
-          SegmentBackfillResult(
-            segmentId = segmentID,
-            rowCount = counts.rows,
-            manifestPaths = manifestPaths,
-            outputPath = outputPath,
-            executionTimeMs = System.currentTimeMillis() - startTime,
-            committedVersion = committedVersion,
-            sourceVersion = sourceVersion,
-            manifestOps = manifestOps,
-            columnGroupArtifact = artifact,
-            sourceRowCount = counts.rows,
-            matchedRowCount = counts.matched,
-            usedSourceByField = counts.usedSnapshot,
-            usedDataFileByField = counts.usedBackfill
-          ),
-          None
+      committed = Some(
+        SegmentBackfillResult(
+          segmentId = segmentID,
+          rowCount = counts.rows,
+          manifestPaths = manifestPaths,
+          outputPath = outputPath,
+          executionTimeMs = System.currentTimeMillis() - startTime,
+          committedVersion = committedVersion,
+          sourceVersion = sourceVersion,
+          manifestOps = manifestOps,
+          columnGroupArtifact = artifact,
+          sourceRowCount = expectedRows(segmentID),
+          matchedRowCount = counts.matched,
+          usedSourceByField = counts.usedSnapshot,
+          usedDataFileByField = counts.usedBackfill
         )
       )
+      writer.close()
+      Iterator.single((committed.get, None))
 
     } catch {
       case e: Exception =>
-        WriterResources.closeAll(e, () => writer.abort(), () => writer.close())
+        if (writer != null)
+          WriterResources.closeAll(
+            e,
+            () => { if (committed.isEmpty) writer.abort() },
+            () => writer.close()
+          )
         Iterator.single(
           (
-            SegmentBackfillResult(
-              segmentId = segmentID,
-              rowCount = 0,
-              manifestPaths = Seq.empty,
-              outputPath = outputPath,
-              executionTimeMs = System.currentTimeMillis() - startTime
+            committed.getOrElse(
+              SegmentBackfillResult(
+                segmentId = segmentID,
+                rowCount = 0,
+                manifestPaths = Seq.empty,
+                outputPath = outputPath,
+                executionTimeMs = System.currentTimeMillis() - startTime
+              )
             ),
             Some(e)
           )
         )
     }
+  }
+
+  /** Validate the entire physical domain before any segment writer can commit.
+    */
+  private[backfill] def validatePhysicalRows(
+      rows: DataFrame,
+      expected: Map[Long, Long]
+  ): Unit = {
+    val actual = rows
+      .groupBy(col(SegmentIdCol))
+      .agg(
+        count("*").as("rows"),
+        countDistinct(col(RowOffsetCol)).as("offsets"),
+        min(col(RowOffsetCol)).as("first"),
+        max(col(RowOffsetCol)).as("last")
+      )
+      .collect()
+      .map { row =>
+        require(
+          !row.isNullAt(0),
+          "Physical rows contain a null segment identity"
+        )
+        val id = row.getLong(0)
+        val size = row.getLong(1)
+        require(
+          !row.isNullAt(3) && !row.isNullAt(4) && row.getLong(2) == size &&
+            row.getLong(3) == 0L && row.getLong(4) == size - 1L,
+          s"Segment $id physical row offsets must cover 0 through ${size - 1L} exactly once"
+        )
+        id -> size
+      }
+      .toMap
+    require(
+      actual == expected.filter(_._2 > 0L),
+      s"Physical segment row counts do not match authoritative snapshot counts: expected=$expected, actual=$actual"
+    )
   }
 
   private[backfill] final case class RowCounts(
@@ -451,7 +520,8 @@ private[backfill] object BackfillSegmentWrite {
   private[backfill] def writeRows(
       rows: Iterator[InternalRow],
       schema: StructType,
-      readsSnapshotFields: Boolean
+      readsSnapshotFields: Boolean,
+      expected: Option[(Long, Long)] = None
   )(write: InternalRow => Unit): RowCounts = {
     val fields = schema.fields
     val fieldIndices = fields.indices
@@ -461,6 +531,15 @@ private[backfill] object BackfillSegmentWrite {
     var written = 0L
     var matched = 0L
     rows.foreach { row =>
+      expected.foreach { case (segmentId, rowCount) =>
+        require(
+          row.getLong(0) == segmentId && row.getLong(
+            1
+          ) == written && written < rowCount,
+          s"Segment $segmentId physical row offset ${row
+              .getLong(1)} does not match expected offset $written of $rowCount"
+        )
+      }
       val values =
         fieldIndices.map(i => row.get(i + 2, fields(i).dataType)).toArray
       if (!row.isNullAt(matchFlag)) matched += 1
@@ -478,6 +557,12 @@ private[backfill] object BackfillSegmentWrite {
       }
       write(new GenericInternalRow(values))
       written += 1
+    }
+    expected.foreach { case (segmentId, rowCount) =>
+      require(
+        written == rowCount,
+        s"Segment $segmentId physical row count $written does not match snapshot count $rowCount"
+      )
     }
     val names = schema.fieldNames
     RowCounts(

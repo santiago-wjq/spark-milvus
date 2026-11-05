@@ -19,8 +19,8 @@ import com.zilliz.spark.connector.write.WriteSchema
 import io.milvus.grpc.common.KeyValuePair
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
 
-/** One test per rule of
-  * docs/design/projects/spark-milvus/architecture/write.html section 3.
+/** One test per rule of the shared Storage V3 writer's collection field and
+  * physical type contract.
   */
 class WriteSchemaTest extends AnyFunSuite with Matchers {
 

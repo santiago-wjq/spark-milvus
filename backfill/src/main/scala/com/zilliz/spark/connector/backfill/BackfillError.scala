@@ -5,13 +5,38 @@ package com.zilliz.spark.connector.backfill
 sealed trait BackfillError {
   def message: String
   def cause: Option[Throwable]
+  def stage: String = "compute"
+  def recovery: Option[BackfillRecovery] = None
+  def cleanupComplete: Option[Boolean] = None
+}
+
+/** A failed operation with a stable phase and optional non-submittable receipt.
+  */
+case class BackfillExecutionError(
+    override val stage: String,
+    message: String,
+    cause: Option[Throwable] = None,
+    override val recovery: Option[BackfillRecovery] = None,
+    override val cleanupComplete: Option[Boolean] = None
+) extends BackfillError
+
+/** Task outcomes collected after some segment commits succeeded. */
+private[backfill] case class PartialWriteError(
+    completedSegments: Map[Long, SegmentBackfillResult],
+    failedSegmentIds: Seq[Long],
+    message: String,
+    cause: Option[Throwable] = None,
+    override val cleanupComplete: Option[Boolean] = None
+) extends BackfillError {
+  override val stage: String = "write"
 }
 
 /** Error connecting to Milvus or retrieving metadata
   */
 case class ConnectionError(
     message: String,
-    cause: Option[Throwable] = None
+    cause: Option[Throwable] = None,
+    override val cleanupComplete: Option[Boolean] = None
 ) extends BackfillError
 
 /** Error validating schema compatibility between original collection and new
@@ -19,7 +44,8 @@ case class ConnectionError(
   */
 case class SchemaValidationError(
     message: String,
-    cause: Option[Throwable] = None
+    cause: Option[Throwable] = None,
+    override val cleanupComplete: Option[Boolean] = None
 ) extends BackfillError
 
 /** Error reading new field data from the provided path
@@ -27,7 +53,8 @@ case class SchemaValidationError(
 case class DataReadError(
     path: String,
     message: String,
-    cause: Option[Throwable] = None
+    cause: Option[Throwable] = None,
+    override val cleanupComplete: Option[Boolean] = None
 ) extends BackfillError
 
 /** Error processing a specific segment during backfill
@@ -35,8 +62,11 @@ case class DataReadError(
 case class SegmentProcessingError(
     segmentId: Long,
     message: String,
-    cause: Option[Throwable] = None
-) extends BackfillError
+    cause: Option[Throwable] = None,
+    override val cleanupComplete: Option[Boolean] = None
+) extends BackfillError {
+  override val stage: String = "write"
+}
 
 /** Error writing backfill data for a segment
   */
@@ -44,21 +74,26 @@ case class WriteError(
     segmentId: Long,
     outputPath: String,
     message: String,
-    cause: Option[Throwable] = None
-) extends BackfillError
+    cause: Option[Throwable] = None,
+    override val cleanupComplete: Option[Boolean] = None
+) extends BackfillError {
+  override val stage: String = "write"
+}
 
 /** Error with Spark configuration or join strategy
   */
 case class SparkConfigError(
     message: String,
-    cause: Option[Throwable] = None
+    cause: Option[Throwable] = None,
+    override val cleanupComplete: Option[Boolean] = None
 ) extends BackfillError
 
 /** General unexpected error during backfill
   */
 case class UnexpectedError(
     message: String,
-    cause: Option[Throwable] = None
+    cause: Option[Throwable] = None,
+    override val cleanupComplete: Option[Boolean] = None
 ) extends BackfillError
 
 object BackfillError {
@@ -74,7 +109,32 @@ object BackfillError {
     case value: WriteError             => value.copy(cause = Some(cause))
     case value: SparkConfigError       => value.copy(cause = Some(cause))
     case value: UnexpectedError        => value.copy(cause = Some(cause))
+    case value: BackfillExecutionError => value.copy(cause = Some(cause))
+    case value: PartialWriteError      => value.copy(cause = Some(cause))
   }
+
+  private[backfill] def withCleanupStatus(
+      error: BackfillError,
+      complete: Boolean
+  ): BackfillError =
+    error match {
+      case value: ConnectionError =>
+        value.copy(cleanupComplete = Some(complete))
+      case value: SchemaValidationError =>
+        value.copy(cleanupComplete = Some(complete))
+      case value: DataReadError => value.copy(cleanupComplete = Some(complete))
+      case value: SegmentProcessingError =>
+        value.copy(cleanupComplete = Some(complete))
+      case value: WriteError => value.copy(cleanupComplete = Some(complete))
+      case value: SparkConfigError =>
+        value.copy(cleanupComplete = Some(complete))
+      case value: UnexpectedError =>
+        value.copy(cleanupComplete = Some(complete))
+      case value: BackfillExecutionError =>
+        value.copy(cleanupComplete = Some(complete))
+      case value: PartialWriteError =>
+        value.copy(cleanupComplete = Some(complete))
+    }
 
   /** Helper to create error from exception
     */

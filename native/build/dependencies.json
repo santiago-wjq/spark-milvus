@@ -84,6 +84,9 @@
     "aws-c-sdkutils": "aws-c-sdkutils/0.2.5#2a932b7ffd4607d9a1c50d1f5d1ef2eb",
     "aws-checksums": "aws-checksums/0.2.10#acf7d2ddabe0cdf08d83e362d4185333",
     "aws-crt-cpp": "aws-crt-cpp/0.40.1#c85891382919486534ac53902c013750",
+    "double-conversion": "double-conversion/3.3.0#640e35791a4bac95b0545e2f54b7aceb",
+    "fast_float": "fast_float/8.0.0@milvus/dev#c7802833c74c5a86ffed70e4af1a795e",
+    "libevent": "libevent/2.1.12#95065aaefcd58d3956d6dfbfc5631d97",
     "s2n": "s2n/1.7.4#336e2b808cbd06dd4aa1c0bc82135dc1"
   }
 }

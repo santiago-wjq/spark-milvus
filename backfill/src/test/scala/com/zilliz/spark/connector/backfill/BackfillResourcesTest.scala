@@ -17,6 +17,8 @@ final class BackfillResourcesTest extends AnyFunSuite {
     )(Right(7))
     assert(released.toSeq == Seq("cached", "input"))
     assert(result.left.toOption.get.cause.contains(unpersist))
+    assert(result.left.toOption.get.stage == "cleanup")
+    assert(result.left.toOption.get.cleanupComplete.contains(false))
     assert(unpersist.getSuppressed.toSeq == Seq(inputClose))
   }
 
@@ -30,6 +32,7 @@ final class BackfillResourcesTest extends AnyFunSuite {
     val result = MilvusBackfill.withCleanup(() => throw close)(execute())
     assert(result.left.toOption.get.isInstanceOf[SchemaValidationError])
     assert(result.left.toOption.get.cause.contains(primary))
+    assert(result.left.toOption.get.cleanupComplete.contains(false))
     assert(primary.getSuppressed.toSeq == Seq(close))
   }
 

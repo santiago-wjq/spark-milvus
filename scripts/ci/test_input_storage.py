@@ -49,9 +49,9 @@ class InputStorageTest(unittest.TestCase):
             values = dict(shlex.split(line)[1].split("=", 1)
                           for line in self.env_file.read_text().splitlines())
             self.assertEqual(self.env_file.stat().st_mode & 0o777, 0o600)
-            self.assertEqual(values["T11_S3_ENDPOINT"], "http://127.0.0.1:34567")
-            self.assertNotEqual(values["T11_S3_SOURCE_ACCESS_KEY"], values["T11_S3_TARGET_ACCESS_KEY"])
-            self.assertNotIn(values["T11_S3_SOURCE_SECRET_KEY"], output.getvalue())
+            self.assertEqual(values["BACKFILL_TEST_S3_ENDPOINT"], "http://127.0.0.1:34567")
+            self.assertNotEqual(values["BACKFILL_TEST_S3_SOURCE_ACCESS_KEY"], values["BACKFILL_TEST_S3_TARGET_ACCESS_KEY"])
+            self.assertNotIn(values["BACKFILL_TEST_S3_SOURCE_SECRET_KEY"], output.getvalue())
             self.ensure_image.assert_called_once_with(self.env_file.parent / "minio-image")
             launch = next(arguments for arguments, _ in self.calls if arguments[0] == "run")
             self.assertIn("milvus-ci-minio:test-recipe", launch)
@@ -65,10 +65,7 @@ class InputStorageTest(unittest.TestCase):
                 listing = next(item for item in statements if "StringLike" in item.get("Condition", {}))
                 self.assertEqual(listing["Condition"]["StringLike"]["s3:prefix"],
                                  [identity, identity + "/*"])
-                head = next(item for item in statements if "Null" in item.get("Condition", {}))
-                self.assertEqual(head["Action"], ["s3:ListBucket"])
-                self.assertEqual(head["Resource"], ["arn:aws:s3:::input-identities"])
-                self.assertEqual(head["Condition"], {"Null": {"s3:prefix": "true"}})
+                self.assertFalse(any("Null" in item.get("Condition", {}) for item in statements))
                 objects = next(item for item in statements if "s3:GetObject" in item["Action"])
                 self.assertEqual(objects["Resource"], [f"arn:aws:s3:::input-identities/{identity}/*"])
             input_storage.stop(self.env_file)
@@ -212,7 +209,7 @@ class InputStorageTest(unittest.TestCase):
         credentials = [value for key, value in values.items()
                        if key.endswith(("_ACCESS_KEY", "_SECRET_KEY"))]
         self.assertCountEqual(masks, credentials)
-        self.assertNotIn(values["T11_S3_ENDPOINT"], masks)
+        self.assertNotIn(values["BACKFILL_TEST_S3_ENDPOINT"], masks)
 
     def test_local_environment_export_does_not_print_secrets(self):
         github_env = Path(self.directory.name) / "local-export.env"
@@ -231,7 +228,7 @@ class InputStorageTest(unittest.TestCase):
         with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}, clear=True), \
                 contextlib.redirect_stdout(io.StringIO()) as output:
             input_storage.mask_workflow_credentials({
-                "T11_S3_SOURCE_SECRET_KEY": "value%\r\n::warning::not-a-command"})
+                "BACKFILL_TEST_S3_SOURCE_SECRET_KEY": "value%\r\n::warning::not-a-command"})
         self.assertEqual(output.getvalue(),
                          "::add-mask::value%25%0D%0A::warning::not-a-command\n")
 

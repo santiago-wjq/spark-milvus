@@ -31,4 +31,36 @@ class BackfillSnapshotAdapterTest extends AnyFunSuite {
         BackfillAdditionalSegments.Empty
     )
   }
+
+  test(
+    "adapter coverage includes empty data segments and rejects omissions, extras and wrong partitions"
+  ) {
+    val entries = Seq(
+      entry(3L),
+      entry(2L).copy(segmentId = 101L),
+      entry(2L).copy(segmentId = 102L, numOfRows = 0L),
+      entry(0L, level = 1L).copy(segmentId = 103L)
+    )
+    MilvusBackfill.validateAdapterCoverage(
+      entries,
+      Map(101L -> 200L, 102L -> 200L)
+    )
+    Seq(
+      Map.empty[Long, Long],
+      Map(101L -> 200L),
+      Map(101L -> 200L, 102L -> 999L),
+      Map(101L -> 200L, 102L -> 200L, 103L -> 200L),
+      Map(101L -> 200L, 102L -> 200L, 100L -> 200L)
+    ).foreach { partitions =>
+      intercept[IllegalArgumentException](
+        MilvusBackfill.validateAdapterCoverage(entries, partitions)
+      )
+    }
+    intercept[IllegalArgumentException](
+      MilvusBackfill.validateAdapterCoverage(
+        Seq(entry(3L).copy(numOfRows = -1L)),
+        Map.empty
+      )
+    )
+  }
 }

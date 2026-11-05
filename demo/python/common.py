@@ -3,7 +3,6 @@ import argparse
 from contextlib import contextmanager
 import json
 from pathlib import Path
-import re
 import sys
 
 
@@ -48,19 +47,6 @@ def read_options(path):
         raise ValueError("Use only documented snapshot/read and fs.*/extfs.* string options")
     return options
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 def bounded_rows(frame, args):
     rows = frame.limit(args.max_rows + 1).collect()
     if len(rows) > args.max_rows:
@@ -86,7 +72,10 @@ def parse_args(description, argv=None, *, filtering=False):
 @contextmanager
 def demo_session(description, argv=None, *, filtering=False):
     args = parse_args(description, argv, filtering=filtering)
-    options = fixture_input()[0] if args.fixture else read_options(args.options)
+    if args.fixture:
+        options, args.expected_rows = fixture_input()
+    else:
+        options, args.expected_rows = read_options(args.options), None
     from pyspark.sql import SparkSession
     spark = SparkSession.builder.appName(description.splitlines()[0]).getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
@@ -98,3 +87,4 @@ def demo_session(description, argv=None, *, filtering=False):
         yield spark, args, options
     finally:
         spark.stop()
+    print("Demo passed")

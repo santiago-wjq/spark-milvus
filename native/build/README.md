@@ -6,7 +6,11 @@ bundle contains the Storage component only. `cmake/Storage.cmake` defines its
 targets; a configuration trace rejects executing the engine's upstream CMake
 files. Optional native components can extend this build through the descriptor
 contract below, so consumers reuse the Storage implementation and resolve one
-shared dependency graph.
+shared dependency graph. The driver owns Storage source, licenses, build settings
+and dependency options. Extensions may add component-owned inputs and reviewed
+shared dependency versions; they cannot replace Storage-owned inputs. Native
+acceptance requires dependency relocations (or declared parent-plugin resolution)
+and fresh JVM loads; diagnostic failures block bundle promotion.
 
 The Storage pin includes Tencent's OIDC assume-role chain. Its source graph
 requires Talon's C++ filesystem, Rust feature and generated CXX bridge; all
@@ -18,7 +22,8 @@ Changing the Storage gitlink requires a fresh native bundle.
 ## Toolchain and dependency graph
 
 `dependencies.json` pins exact upstream recipe revisions. Its
-`transitive_references` records the AWS CRT recipe family validated with the
+`transitive_references` records Folly's reviewed double-conversion, fast_float
+and libevent recipes and the AWS CRT recipe family validated with the
 pinned Milvus AWS SDK recipe. Conan Center can publish a different recipe for the
 same version with incompatible dependency requirements; an empty cache must
 resolve the same reviewed family as an existing cache. The driver supplies these
@@ -51,7 +56,19 @@ OpenBLAS uses `dynamic_arch=True`, with common-code targets `NEHALEM` on x86
 and `ARMV8` on ARM to prevent build-host AVX512 flags entering common kernels.
 Its compiled thread capacity is 64; the package-scoped CMake configuration
 participates in Conan's package ID. Runtime thread settings still control
-concurrency. Header-only dependencies and the internal Rust bridge do not
+concurrency. Folly's recipe removes its `FindLibAIO.cmake`; Linux profiles provide
+`LIBAIO_LIBRARIES=aio` to Folly's own CMake build and include that setting in
+its package ID. Folly must carry its own `libaio` dependency instead of relying
+on another library to make its unresolved AIO calls loadable.
+Linux milvus-common also links its own atomic operations through the upstream
+`COMMON_LINKER_LIBS` input. On Linux, for the exact pinned gRPC and OpenTelemetry recipes,
+`cmake/DependencyLinkage.cmake` supplies missing target dependencies after their
+CMake targets exist: OpenTelemetry's gRPC proto library links the Conan gRPC
+wrapper, and the generated upb descriptor table belongs to the shared lower
+provider used by both JSON/textformat and gRPC. The hook rejects unreviewed
+recipe/source shapes. Both Conan contexts include its content hash in package
+identity; incidental build paths do not decide cached binary identity.
+Header-only dependencies and the internal Rust bridge do not
 expose shared-library options.
 
 ## Build and resume
@@ -118,11 +135,11 @@ The descriptor's `components` array has these fields for each component:
 | `name`, `revision` | Distinct lowercase component name and exact 40-character Git revision |
 | `sourceDirectory`, `sourceObjectDirectory` | Immutable source snapshot and original Git object source |
 | `recipe`, `recipeOptions` | Upstream Conan recipe path and options used when validating its requirements |
-| `cmake`, `cmakeVariables` | CMake extension file and explicit cache variables; the extension adds and installs its targets when included |
+| `cmake`, `cmakeVariables` | Component CMake file and cache variables; driver namespaces (`CMAKE_`, `MILVUS_`, `STORAGE_`, `FETCHCONTENT_`) are reserved |
 | `loadEntries` | Platform-specific JNI filenames; JVM acceptance loads the combined entries in forward and reverse order, omitting duplicate orders |
 | `dlopenEntries`, `parentProviders` | Engine/plugin entry libraries and explicit plugin-to-provider relationships for staging diagnostics |
 | `testNames` | Exact CTest names required before a bundle can be promoted |
-| `sourceLicenseDirectories` | Map from license owner to `{ "directory": "/source/snapshot", "files": ["LICENSE"] }`; paths must stay inside that source directory |
+| `sourceLicenseDirectories` | Map from license owner to `{ "directory": "/source/snapshot", "files": ["LICENSE"] }`; owners must be the component name or begin with that name plus `-`; documents must be nonempty and remain inside the component snapshot |
 
 The driver computes source manifests and source identities itself, hashes the
 extension CMake directory, and rejects changed inputs on resume. Supplied source
@@ -136,7 +153,11 @@ requirements; platform scopes apply to both kinds of pin.
 its nested maps extend the Storage policy. `platformScope` and `staticOn`
 apply platform restrictions. `conanOptions` and `conanConf` become explicit
 Conan host options and configuration, including package-ID inputs where needed.
-They participate in the dependency input identity. Dependency conflicts must
+Existing Storage dependency options and configuration cannot be overridden;
+shared OpenBLAS configuration, for example, remains in the public profile.
+Extensions cannot replace a recipe revision at the same version or alter an
+existing platform/version policy. These inputs participate in the dependency
+identity. Dependency conflicts must
 satisfy the same newer-upstream-version policy as the public graph.
 
 `featureOptions` contains boolean features. `metadata` records consumer-owned
@@ -171,12 +192,15 @@ A public bundle loads the Storage JNI entry; an extended bundle tests each
 unique forward/reverse order. The checker uses the selected JRE's `libjsig`,
 clears additional library paths and JVM injection options, and rejects a failed
 load. Provenance records `auditPolicy: jvm-load` and the exact `jvmLoadTests`.
-Per-library relocation, private-symbol and `RTLD_NOW` diagnostics are retained
-but do not replace JVM loading. JNI load success does not establish query or
+Per-library relocation, private-symbol and `RTLD_NOW` checks must also pass.
+Plugins may resolve declared parent-engine symbols only when their recorded
+parent provides every unresolved symbol and the parent-context check succeeds.
+A missing diagnostic tool or failed dependency check blocks acceptance even
+when both JVM loads succeed. The packager repeats these checks on its input bytes. JNI load success does not establish query or
 write correctness; native fixtures and object-storage integration remain
 separate acceptance steps.
 
-Only a candidate whose declared component tests and JVM loading pass replaces
+Only a candidate whose declared component tests, relocations and JVM loading pass replaces
 `bundle/`. A failed retry preserves the previous successful bundle. Package a
 validated directory with:
 

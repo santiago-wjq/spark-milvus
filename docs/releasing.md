@@ -30,13 +30,28 @@ implementation or Knowhere binding.
 
 ## Build a candidate
 
+CI assigns `2.1.0-rc.<run-id>.<producing-attempt>` and rejects coordinates
+belonging to another run or attempt. Dispatch without a version override. An
+explicit release uses its pushed tag. Candidate planning checks Central for
+existing coordinates before building; failed lookups do not mean a name is
+available. Maven orders numeric `alpha`, `beta` and `rc` qualifiers before the
+corresponding final version. Arbitrary prerelease labels are rejected.
+Rerun all jobs or dispatch a new run when producing a replacement candidate;
+consumers bind the exact artifact ID and digest they accepted. Development
+snapshots remain isolated by branch and architecture.
+
+`project/public-packages.txt` declares package ownership for the five modules.
+Thin artifacts may contain only their owner's classes and sources; reader JVM
+bundles may contain the reader modules and their declared dependencies. Update
+a package's responsibility statement before changing this positive contract.
+
 Use Java 21 and initialize `milvus-proto` and `milvus-storage`. The sbt
 `exportBuildMatrix` task is authoritative for source profiles, native platforms
 and deployment inputs. `scripts/release.py plan` derives the artifact inventory.
 
 ```bash
 sbt 'exportBuildMatrix target/build-matrix.json'
-python3 scripts/release.py plan --version 2.1.0-migration.1 \
+python3 scripts/release.py plan --version 2.1.0-rc.1 \
   --matrix target/build-matrix.json --output target/release-plan.json
 ```
 

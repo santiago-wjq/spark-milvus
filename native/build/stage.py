@@ -300,7 +300,8 @@ def copy_source_licenses(metadata, destination):
             shutil.copy2(document, target)
 
 
-def _run_native_diagnostics(directory, names, jvm_sequence, dlopen_sequence, output):
+def _run_native_diagnostics(directory, names, jvm_sequence, dlopen_sequence, output, parent_providers=None):
+    parent_providers = PARENT_PROVIDERS if parent_providers is None else parent_providers
     jvm_entries = set(jvm_sequence)
     results = {}
     failed = []
@@ -315,8 +316,8 @@ def _run_native_diagnostics(directory, names, jvm_sequence, dlopen_sequence, out
         stack = [line.strip() for line in command("readelf", "-lW", path).splitlines() if "GNU_STACK" in line]
         passed = len(stack) == 1 and "RWE" not in stack[0]
         results[name] = {"context": "dependency", "gnuStack": stack, "passed": passed}
-        if name in PARENT_PROVIDERS:
-            parent = PARENT_PROVIDERS[name]
+        if name in parent_providers:
+            parent = parent_providers[name]
             result = subprocess.run(["ldd", "-r", str(path)], env=clean_environment(), text=True,
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
             (output / (name + ".ldd-r.txt")).write_text(result.stdout)
@@ -396,6 +397,7 @@ def _run_native_diagnostics(directory, names, jvm_sequence, dlopen_sequence, out
     (output / "results.json").write_text(json.dumps(results, indent=2) + "\n")
     (output / "diagnostic-failures.json").write_text(
         json.dumps(sorted(set(failed)), indent=2) + "\n")
+    return sorted(set(failed))
 
 
 def audit(directory, names, jvm_entries, dlopen_entries, output):
@@ -410,15 +412,23 @@ def audit(directory, names, jvm_entries, dlopen_entries, output):
     missing_files = [name for name in names if not (directory / name).is_file()]
     if missing_files:
         raise ValueError("Native audit lists missing libraries: " + ", ".join(sorted(missing_files)))
+    diagnostic_error = None
+    failed = []
     try:
-        _run_native_diagnostics(directory, names, jvm_sequence, dlopen_sequence, output)
+        failed = _run_native_diagnostics(directory, names, jvm_sequence, dlopen_sequence, output)
     except Exception as error:
+        diagnostic_error = error
         (output / "diagnostic-error.txt").write_text(
             type(error).__name__ + ": " + str(error) + "\n")
     jvm_load_tests = check_jvm_loads(directory, output, load_entries=jvm_sequence)
     (output / "jvm-load-tests.json").write_text(json.dumps(jvm_load_tests, indent=2) + "\n")
     if any(record["exit"] != 0 for record in jvm_load_tests):
         raise JvmLoadAuditError(jvm_load_tests)
+    if diagnostic_error is not None or failed:
+        error = ValueError("Native relocation audit failed: " +
+                           (str(diagnostic_error) if diagnostic_error else ", ".join(failed)))
+        error.records = jvm_load_tests
+        raise error from diagnostic_error
     return jvm_load_tests
 
 
@@ -506,9 +516,9 @@ def main():
     try:
         metadata["jvmLoadTests"] = audit(args.output / "lib", sorted(selected), load_entries,
                                          dlopen_entries, args.output / "audit")
-    except JvmLoadAuditError as error:
+    except ValueError as error:
         metadata["audit"] = "failed"
-        metadata["jvmLoadTests"] = error.records
+        metadata["jvmLoadTests"] = getattr(error, "records", [])
         metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
         raise
     metadata["audit"] = "passed"

@@ -36,9 +36,9 @@ object ReleaseArtifacts {
       require(
         value
           .matches(
-            "[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?"
+            "2\\.[0-9]+\\.[0-9]+(?:-(?:(?:alpha|beta|rc)\\.[0-9]+(?:\\.[0-9]+)*|central-test\\.[0-9]+))?"
           ) && !value.endsWith("-SNAPSHOT"),
-        "release.version must be an explicit release version, for example 2.1.0 or 2.1.0-migration.1"
+        "release.version must be an explicit release version, for example 2.1.0 or 2.1.0-rc.1"
       )
       value
     }

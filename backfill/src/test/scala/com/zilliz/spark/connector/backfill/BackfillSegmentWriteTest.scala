@@ -77,4 +77,41 @@ class BackfillSegmentWriteTest extends AnyFunSuite with Matchers {
     consumed shouldBe 2
   }
 
+  test(
+    "authoritative offsets reject missing, duplicate and foreign physical rows"
+  ) {
+    val schema = StructType(Seq(StructField("n", LongType, true)))
+    Seq(
+      Seq(InternalRow(10L, 1L, 7L, true)),
+      Seq(InternalRow(10L, 0L, 7L, true), InternalRow(10L, 0L, 8L, true)),
+      Seq(InternalRow(11L, 0L, 7L, true)),
+      Seq(InternalRow(10L, 0L, 7L, true)),
+      Seq(
+        InternalRow(10L, 0L, 7L, true),
+        InternalRow(10L, 1L, 8L, true),
+        InternalRow(10L, 2L, 9L, true)
+      )
+    ).foreach { rows =>
+      intercept[IllegalArgumentException] {
+        BackfillSegmentWrite.writeRows(
+          rows.iterator,
+          schema,
+          false,
+          Some(10L -> 2L)
+        )(_ => ())
+      }
+    }
+    BackfillSegmentWrite
+      .writeRows(
+        Iterator(
+          InternalRow(10L, 0L, 7L, true),
+          InternalRow(10L, 1L, 8L, true)
+        ),
+        schema,
+        false,
+        Some(10L -> 2L)
+      )(_ => ())
+      .rows shouldBe 2L
+  }
+
 }

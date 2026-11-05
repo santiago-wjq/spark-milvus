@@ -49,12 +49,6 @@ object BackfillConsumerSmoke {
     var spark: SparkSession = null
     try {
       copyFixture(Paths.get(args(0)).toAbsolutePath, root)
-      try {
-        Class.forName("com.zilliz.milvus.client.api.MilvusClient")
-        throw new IllegalStateException(
-          "Public backfill consumer contains a private service client"
-        )
-      } catch { case _: ClassNotFoundException => () }
       spark = SparkSession
         .builder()
         .master(sys.props.getOrElse("milvus.smoke.master", "local[2]"))
