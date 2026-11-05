@@ -133,6 +133,28 @@ target_link_libraries(grpc_unsecure upb_mini_descriptor_lib)
         self.assertIn("try_compile\n", (self.root / "compiler-checks.txt").read_text())
         self.assert_resolved(fixed, "opentelemetry_proto_grpc")
 
+    def test_static_build_tool_keeps_descriptor_in_parent_archives(self):
+        fixture = self.grpc_fixture().replace(" SHARED ", " STATIC ")
+        self.source("grpc.c", "extern int json_descriptor(void); extern int text_descriptor(void);\n"
+                    "extern const int google__protobuf__FileOptions_msg_init;\n"
+                    "int grpc_api(void) { return json_descriptor() + text_descriptor()"
+                    " + google__protobuf__FileOptions_msg_init; }\n")
+        self.source("tool.c", "extern int grpc_api(void); extern int grpc_unsecure_api(void);\n"
+                    "int main(void) { return grpc_api() == 51 && grpc_unsecure_api() == 17 ? 0 : 1; }\n")
+        fixture += "\nadd_executable(grpc_tool tool.c)\ntarget_link_libraries(grpc_tool PRIVATE grpc grpc_unsecure)\n"
+        fixed = self.build("grpc", fixture, fixed=True, toolchain=True)
+        self.command(fixed / "grpc_tool")
+        for target in ("upb_mini_descriptor_lib", "grpc", "grpc_unsecure"):
+            definitions = self.command("nm", "--defined-only", fixed / ("lib" + target + ".a")).stdout
+            self.assertEqual(target != "upb_mini_descriptor_lib", "google__protobuf__FileOptions_msg_init" in definitions)
+
+    def test_mixed_grpc_library_kinds_are_rejected(self):
+        fixture = self.grpc_fixture().replace("add_library(upb_mini_descriptor_lib SHARED",
+                                               "add_library(upb_mini_descriptor_lib STATIC")
+        _, result = self.configure("grpc", fixture, fixed=True)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("Reviewed gRPC/upb library kinds are mixed", result.stdout)
+
     def test_changed_recipe_is_rejected_before_target_corrections(self):
         _, result = self.configure("opentelemetry-cpp", self.otel_fixture(), fixed=True,
                                    recipe=RECIPES["opentelemetry-cpp"].replace("1.23.0", "1.24.0"))
