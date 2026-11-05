@@ -119,7 +119,10 @@ query wherever Milvus's semantics are the ones that apply.
     segcore reads that key for every index: without it the load fails with a
     JSON type error.
 
-  A load takes a cancellation source. A cancelled load stops with segcore's
+  `SegcoreLoadInfo` in `core` writes this load info from a segment of the
+  read model and the indexes the caller loads with it, each with
+  `load_priority` `HIGH`, the priority QueryCoord gives a load a user asks
+  for. A load takes a cancellation source. A cancelled load stops with segcore's
   cancellation error (code 2038 at the pinned Milvus), and the segment can be
   loaded again.
 - **segcore's memory is the cache layer's.** Field data and indexes a sealed
@@ -150,6 +153,15 @@ query wherever Milvus's semantics are the ones that apply.
   bounded subset of Plan.g4 and rejects the rest, so wider Milvus syntax means
   a wider front end in the JVM, not the Go parser on the driver or anywhere
   else.
+- **The load info is written field by field.** `segcore.proto` imports
+  `index_coord.proto` for one enum, and through it `internal.proto`:
+  generating `SegmentLoadInfo` and `FieldIndexInfo` the way `plan.proto`'s
+  messages are generated would add unchanged copies of both files and dozens
+  of messages nothing uses. `SegcoreLoadInfo` writes the two messages with
+  `CodedOutputStream` and names each field number once. Protobuf never gives
+  a field number another meaning, so a gitlink move cannot change what they
+  encode; a field Milvus adds is left unset until it is added here, and the
+  differential test loads what `SegcoreLoadInfo` writes.
 - **segcore decides which rows a segment excludes; the connector keeps the
   vector search.** For each segment, segcore evaluates the predicates assigned
   to it and returns the matching row offsets, which become the exclusion
@@ -264,7 +276,8 @@ sealed fixture covers string fields.
 - Tests of remote storage and of scalar indexes. `initRemoteFileSystem` and
   `initRemoteChunkManager` have loaded a segment Milvus wrote to S3 together
   with its BITMAP, INVERTED, STL_SORT and TRIE indexes in packed V3 files,
-  checked by hand against the rows written. Every single-field filter on an
+  from the load info `SegcoreLoadInfo` wrote for the segment as
+  `SnapshotCatalog` resolved it, checked by hand against the rows written. Every single-field filter on an
   indexed field reported its index's path and family, except suffix matches
   on an INVERTED string field, which segcore declines to the raw data. No
   test here covers an object store, and no fixture carries a scalar index.

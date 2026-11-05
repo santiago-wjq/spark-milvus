@@ -81,6 +81,7 @@ class SearchExecutionPlanTest extends AnyFunSuite with Matchers {
       100L,
       1L,
       Some(8),
+      None,
       Some(0)
     )
     segment(id, Some(rows))

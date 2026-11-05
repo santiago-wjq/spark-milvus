@@ -1,12 +1,10 @@
 package com.zilliz.milvus.storage.expr
 
-import java.io.ByteArrayOutputStream
-import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.{Files, Path, Paths}
 import scala.jdk.CollectionConverters._
 
 import com.fasterxml.jackson.databind.ObjectMapper
-import com.google.protobuf.{CodedInputStream, CodedOutputStream, WireFormat}
+import com.google.protobuf.{CodedInputStream, WireFormat}
 import org.apache.arrow.memory.RootAllocator
 import org.apache.arrow.vector.{BigIntVector, FieldVector, VectorSchemaRoot}
 import org.scalatest.funsuite.AnyFunSuite
@@ -16,11 +14,9 @@ import org.scalatest.BeforeAndAfterAll
 import com.zilliz.milvus.jni.segcore.SegcoreNative
 import com.zilliz.milvus.storage.expr.ComparisonOperator._
 import com.zilliz.milvus.storage.expr.Literal._
-import com.zilliz.milvus.storage.io.ReadFixtures
-import com.zilliz.milvus.storage.snapshot.json.{
-  ManifestContentJson,
-  SnapshotJson
-}
+import com.zilliz.milvus.storage.io.{LocalObjectStore, ReadFixtures}
+import com.zilliz.milvus.storage.segcore.SegcoreLoadInfo
+import com.zilliz.milvus.storage.snapshot.{SegmentIndexes, SnapshotCatalog}
 import io.milvus.grpc.schema.{
   CollectionSchema,
   DataType => MilvusDataType,
@@ -30,13 +26,15 @@ import io.milvus.grpc.schema.{
 
 /** segcore against [[PredicateEvaluator]] on the same rows.
   *
-  * Each fixture's sealed segments are loaded into segcore from their V3
-  * manifests, and its literal input rows from `expected.json` become Arrow
-  * batches for the JVM evaluator, so neither side's answer comes from the
-  * other's read. For every predicate here, the rows a segcore retrieve returns
-  * must be the rows the JVM evaluator keeps: TRUE, under the three-valued logic
-  * Spark applies. The retrieves read at timestamp 150, after the inserts (100)
-  * and before the deletes (200), so deletes take no part in the comparison.
+  * Each fixture is resolved into the read model as a read resolves a snapshot,
+  * and its sealed segments are loaded into segcore from their V3 manifests with
+  * the load info [[SegcoreLoadInfo]] writes from that model. Its literal input
+  * rows from `expected.json` become Arrow batches for the JVM evaluator, so
+  * neither side's answer comes from the other's read. For every predicate here,
+  * the rows a segcore retrieve returns must be the rows the JVM evaluator
+  * keeps: TRUE, under the three-valued logic Spark applies. The retrieves read
+  * at timestamp 150, after the inserts (100) and before the deletes (200), so
+  * deletes take no part in the comparison.
   *
   * The suite needs the segcore build's libraries (native/segcore/build), found
   * through `milvus.segcore.lib`, and runs in a JVM of its own; without them it
@@ -106,23 +104,20 @@ class SegcoreDifferentialTest
     private val root = work.resolve(name)
     ReadFixtures.copyTo(s"collections/$name", root)
 
-    private val snapshot = SnapshotJson
-      .parse(
-        new String(Files.readAllBytes(root.resolve("snapshot.json")), UTF_8)
-      )
-      .fold(error => throw error, identity)
+    // The read model of the fixture, resolved as a read resolves a snapshot;
+    // the local store has no bucket.
+    private val snapshot =
+      new SnapshotCatalog(new LocalObjectStore(root.toString), "")
+        .read("snapshot.json")
 
-    val fields: Seq[FieldSchema] =
-      CollectionSchema
-        .parseFrom(snapshot.collection.schema.toProtobufBytes)
-        .fields
+    val fields: Seq[FieldSchema] = snapshot.schema.fields
 
     // RootCoord appends the system fields to every collection; a sealed
     // segment's column groups carry them, and segcore resolves each column
     // through the schema.
     val collection: Long = SegcoreNative.newCollection(
       CollectionSchema(
-        name = snapshot.collection.schema.name,
+        name = snapshot.schema.name,
         fields = fields ++ Seq(
           FieldSchema(
             fieldID = 0,
@@ -139,29 +134,31 @@ class SegcoreDifferentialTest
         )
       ).toByteArray
     )
-    SegcoreNative.setLoadFields(collection, Array(pk, category))
+    private val loadFields = Array(pk, category)
+    SegcoreNative.setLoadFields(collection, loadFields)
 
     val segments: Seq[Segment] = {
-      val manifests = snapshot.storageV2ManifestList
-        .getOrElse(Seq.empty)
-        .map(item => item.segmentID -> item.manifest)
-        .toMap
-      val partition = snapshot.snapshotInfo.partitionIds.head
+      val described = snapshot.segments.map(s => s.id -> s).toMap
       expectedSegments(root.resolve("expected.json")).map {
         case (segment, rows, deleted) =>
-          val manifest = ManifestContentJson
-            .parse(manifests(segment))
-            .fold(error => throw error, identity)
+          val model = described(segment)
+          model.rows shouldBe Some(rows.size.toLong)
+          // Only the indexes of the fields the predicates read; the fixtures
+          // index no such field.
+          val indexes = model.indexes match {
+            case SegmentIndexes.Available(all) =>
+              all.filter(index => loadFields.contains(index.fieldId))
+            case _ => Vector.empty
+          }
           val handle = SegcoreNative.newSealedSegment(
             collection,
             segment,
             false,
-            loadInfo(
-              segment,
-              partition,
-              snapshot.snapshotInfo.collectionId,
-              rows.size,
-              absoluteManifest(manifest.ver, root.resolve(manifest.basePath))
+            SegcoreLoadInfo.encode(
+              snapshot.collectionId,
+              model,
+              indexes,
+              Some(root)
             )
           )
           SegcoreNative.load(handle, 0L)
@@ -191,37 +188,6 @@ class SegcoreDifferentialTest
         segment.get("deletedIds").elements().asScala.map(_.asLong()).toSet
       (segment.get("id").asLong(), rows, deleted)
     }
-  }
-
-  /** Milvus keys for local storage are absolute paths; the fixture's are
-    * relative to its directory, as remote keys are to their bucket.
-    */
-  private def absoluteManifest(version: Long, basePath: Path): String = {
-    val node = new ObjectMapper().createObjectNode()
-    node.put("ver", version)
-    node.put("base_path", basePath.toAbsolutePath.toString)
-    node.toString
-  }
-
-  // segcore.SegmentLoadInfo{segmentID=1, partitionID=2, collectionID=3,
-  // num_of_rows=7, storageVersion=15, manifest_path=21}
-  private def loadInfo(
-      segment: Long,
-      partition: Long,
-      collection: Long,
-      rows: Long,
-      manifest: String
-  ): Array[Byte] = {
-    val bytes = new ByteArrayOutputStream()
-    val out = CodedOutputStream.newInstance(bytes)
-    out.writeInt64(1, segment)
-    out.writeInt64(2, partition)
-    out.writeInt64(3, collection)
-    out.writeInt64(7, rows)
-    out.writeInt64(15, 3L)
-    out.writeString(21, manifest)
-    out.flush()
-    bytes.toByteArray
   }
 
   /** The primary keys of a segcore.RetrieveResults{ids=1}. */
