@@ -25,6 +25,7 @@ sources. This driver only supplies what Milvus leaves to its environment:
   submodule, which must be the commit Milvus's go.mod names,
 * a check that core's copy of plan.proto is the file at the milvus gitlink,
 * -DWITH_JNI=OFF for now, and the engine sources Milvus pins (see build_core),
+* a check that lib/ holds no storage library a build with JNI on copied there,
 * the segcore JNI library, compiled against the installed Milvus output.
 
 The Go plan parser is not built: the connector builds planpb.PlanNode itself.
@@ -50,6 +51,12 @@ PROTO_MODULE = "github.com/milvus-io/milvus-proto/go-api/v3"
 
 # Rust toolchain the Milvus scripts install for the storage bridge and tantivy.
 MILVUS_RUST = "1.94.1"
+
+# What only a build with -DWITH_JNI=ON writes to the work directory's lib/:
+# milvus-storage's JNI target copies its own library and the storage library
+# there after linking (cmake/CopyDependencies.cmake, OUTPUT_DIR
+# ${CMAKE_BINARY_DIR}/lib).
+JNI_BUILD_COPIES = ("libmilvus-storage.so", "libmilvus-storage-jni.so")
 
 
 def run(cmd, cwd=None, env=None):
@@ -162,6 +169,21 @@ def generate_proto(work, env):
             cwd=MILVUS / "pkg" / "proto", env=env)
 
 
+def check_jni_build_copies(work):
+    """Stop on storage libraries an earlier build with the engines' JNI on left.
+
+    Milvus installs the work directory's lib/ whole, after the storage
+    library this build links, so such a copy would take that library's place
+    in the output and segcore would run against an older milvus-storage.
+    Setting WITH_JNI=OFF again clears the cache entry, not the files.
+    """
+    copies = [work / "lib" / name for name in JNI_BUILD_COPIES if (work / "lib" / name).exists()]
+    if copies:
+        sys.exit("a build with WITH_JNI=ON left " + ", ".join(str(c) for c in copies) + ", which the "
+                 "install would put in place of the milvus-storage this build links; remove them first: rm "
+                 + " ".join(shlex.quote(str(c)) for c in copies))
+
+
 def build_core(env, jobs):
     env = dict(env)
     # The engines' JNI stays off: milvus-storage's JNI post-build step copies
@@ -172,7 +194,8 @@ def build_core(env, jobs):
     # Knowhere and storage JNI come from native/build. Explicit values also
     # clear what an earlier configure cached: JNI on, or an engine source
     # supplied through FETCHCONTENT_SOURCE_DIR_*, which an empty value returns
-    # to the commit Milvus pins.
+    # to the commit Milvus pins. The files a build with JNI on copied stay;
+    # check_jni_build_copies stops on them.
     env["CMAKE_EXTRA_ARGS"] = " ".join([
         "-DWITH_JNI=OFF",
         "-DFETCHCONTENT_SOURCE_DIR_KNOWHERE=",
@@ -222,6 +245,7 @@ def main():
     env["CARGO_NET_GIT_FETCH_WITH_CLI"] = "true"
 
     if not args.only_jni:
+        check_jni_build_copies(work)
         conan_install(work, profile, env)
         link_work_dir(work)
         generate_proto(work, env)

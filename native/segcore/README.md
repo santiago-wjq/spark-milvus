@@ -227,7 +227,10 @@ the ones it was installed from, so moving the `milvus` gitlink reinstalls the
 graph instead of building new sources against old packages; `conan` on the
 path must be Conan 2. Knowhere and milvus-storage build from the commits
 Milvus pins, and `build.py` passes that explicitly, which also clears an
-engine source an earlier configure cached.
+engine source an earlier configure cached. It stops while the work
+directory's `lib/` holds the storage libraries a build with `-DWITH_JNI=ON`
+copies there: Milvus installs that directory whole, so they would replace
+the storage library this build links.
 
 ## Probe
 
