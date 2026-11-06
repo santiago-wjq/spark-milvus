@@ -8,3 +8,7 @@
 	path = knowhere
 	url = https://github.com/zilliztech/knowhere.git
 	branch = main
+[submodule "milvus"]
+	path = milvus
+	url = https://github.com/milvus-io/milvus.git
+	update = none

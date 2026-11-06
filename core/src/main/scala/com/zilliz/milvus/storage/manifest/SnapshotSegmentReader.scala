@@ -45,6 +45,7 @@ case class IndexFileEntry(
     serializedSize: Long,
     indexVersion: Long,
     currentIndexVersion: Option[Int],
+    currentScalarIndexVersion: Option[Int],
     indexStorePathVersion: Option[Int]
 )
 
@@ -417,6 +418,7 @@ object SnapshotSegmentReader extends com.zilliz.milvus.storage.Logging {
         serializedSize = asLong(rec.get("serialized_size")),
         indexVersion = asLong(rec.get("index_version")),
         currentIndexVersion = optionalInt("current_index_version"),
+        currentScalarIndexVersion = optionalInt("current_scalar_index_version"),
         indexStorePathVersion = optionalInt("index_store_path_version")
       )
     }

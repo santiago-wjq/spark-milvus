@@ -29,6 +29,7 @@ class IndexFileCodecTest extends AnyFunSuite {
     100,
     1,
     Some(8),
+    None,
     Some(0)
   )
 
