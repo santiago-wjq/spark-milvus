@@ -725,6 +725,40 @@ class ReleaseTest(unittest.TestCase):
                          {"ubuntu-22.04", "ubuntu-24.04", "macos-15", "macos-26"})
         self.assertEqual(set(plan["pins"]), {"milvus-proto", "milvus-storage"})
 
+    def test_release_plan_exports_backfill_for_every_backfill_line(self):
+        output = self.root / "backfill-plan.json"
+        release.create_plan("2.0.0-rc.1", output, self.build_matrix)
+        plan = json.loads(output.read_text())
+        selections = {product: sorted((row["line"], row["scala"]) for row in plan["thin"]
+                                      if row["product"] == product)
+                      for product in ("reader", "backfill")}
+        self.assertEqual(selections["reader"], [("3.5", "2.12.20"), ("3.5", "2.13.16"), ("4.0", "2.13.16"),
+                                                ("4.1", "2.13.16"), ("4.2", "2.13.16")])
+        self.assertEqual(selections["backfill"], [("4.0", "2.13.16"), ("4.2", "2.13.16")])
+        inventory = release.thin_inventory(plan)
+        for line in release.BACKFILL_LINES:
+            self.assertEqual(inventory[f"spark-milvus-backfill-{line}_2.13"],
+                             ("backfill", (f"spark-milvus-{line}-thin_2.13", "spark-milvus-core_2.13"), line))
+        # A matrix without one backfill line fails instead of dropping its module.
+        matrix = json.loads(self.build_matrix.read_text())
+        matrix["spark"] = [dict(row, line="4.1") if row["line"] == "4.2" else row for row in matrix["spark"]]
+        release.write_json(self.build_matrix, matrix)
+        with self.assertRaisesRegex(ValueError, "one Scala 2.13 combination for each backfill line"):
+            release.create_plan("2.0.0-rc.1", output, self.build_matrix)
+
+    def test_backfill_thin_graph_exists_only_for_backfill_lines(self):
+        for line in ("4.0", "4.2"):
+            with self.subTest(line=line):
+                graph = release.thin_graph(line, "2.13", "backfill")
+                self.assertEqual(graph[f"spark-milvus-backfill-{line}_2.13"],
+                                 ("backfill", (f"spark-milvus-{line}-thin_2.13", "spark-milvus-core_2.13")))
+                self.assertEqual(set(graph) - set(release.thin_graph(line, "2.13", "reader")),
+                                 {f"spark-milvus-backfill-{line}_2.13"})
+        for line, binary in (("3.5", "2.12"), ("3.5", "2.13"), ("4.1", "2.13")):
+            with self.subTest(line=line, binary=binary), \
+                    self.assertRaisesRegex(ValueError, "^Backfill supports Spark 4.0 and 4.2 / Scala 2.13$"):
+                release.thin_graph(line, binary, "backfill")
+
     def test_release_plan_takes_versions_from_the_exported_matrix(self):
         rows = [dict(row, spark="4.0.2") if row["line"] == "4.0" else row for row in RELEASE_ROWS]
         matrix = json.loads(self.build_matrix.read_text())

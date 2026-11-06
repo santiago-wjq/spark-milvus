@@ -26,6 +26,7 @@ import com.zilliz.milvus.storage.snapshot.json.{
   ManifestItemJson,
   SegmentListJson
 }
+import com.zilliz.spark.connector.input.IcebergInput
 import com.zilliz.spark.connector.write.WriteOptions
 import com.zilliz.spark.connector.write.WriteSchema
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
@@ -1246,84 +1247,88 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
     }
   }
 
-  test(
-    "run gives explicit Iceberg source identity priority over inherited same-bucket target credentials"
-  ) {
-    withDirectory { root =>
-      val base = s3Config
-      val config = base.copy(
-        storageProperties = localStorage(root),
-        inputFormat = "iceberg",
-        sourceS3Endpoint = Some(required("BACKFILL_TEST_S3_ENDPOINT")),
-        sourceS3AccessKey =
-          Some(required("BACKFILL_TEST_S3_SOURCE_ACCESS_KEY")),
-        sourceS3SecretKey =
-          Some(required("BACKFILL_TEST_S3_SOURCE_SECRET_KEY")),
-        sourceS3UseIam = Some(false),
-        sourceS3UseSSL = Some(false),
-        sourceS3Region = Some("us-east-1")
-      )
-      val source = fixture(root, config.storageProperties)
-      val catalog =
-        "backfillinput" + UUID.randomUUID().toString.replace("-", "")
-      val property = s"spark.sql.catalog.$catalog"
-      val warehouse = s"s3a://${base.s3BucketName}/source/$catalog/warehouse"
-      spark.conf.set(property, "org.apache.iceberg.spark.SparkCatalog")
-      spark.conf.set(property + ".type", "hadoop")
-      spark.conf.set(property + ".warehouse", warehouse)
-      hadoopOptions(config, warehouse).foreach { case (key, value) =>
-        spark.conf.set(s"$property.hadoop.$key", value)
-      }
-      spark.sql(
-        s"CREATE TABLE $catalog.db.rows (pk BIGINT, n BIGINT) USING iceberg"
-      )
-      spark.sql(
-        s"INSERT INTO $catalog.db.rows VALUES (1, NULL), (2, 200), (3, 300), (5, 500), (99, 9900)"
-      )
-      val conf = spark.sparkContext.hadoopConfiguration
-      val prefix = s"fs.s3a.bucket.${base.s3BucketName}."
-      val target = Map(
-        prefix + "access.key" -> base.s3AccessKey,
-        prefix + "secret.key" -> base.s3SecretKey,
-        prefix + "aws.credentials.provider" -> "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
-      )
-      val previous = target.keys.map(key => key -> Option(conf.get(key))).toMap
-      try {
-        target.foreach { case (key, value) =>
-          conf.set(key, value)
+  // Lines without an Iceberg runtime cover the refusal in IcebergInputTest.
+  if (IcebergInput.available)
+    test(
+      "run gives explicit Iceberg source identity priority over inherited same-bucket target credentials"
+    ) {
+      withDirectory { root =>
+        val base = s3Config
+        val config = base.copy(
+          storageProperties = localStorage(root),
+          inputFormat = "iceberg",
+          sourceS3Endpoint = Some(required("BACKFILL_TEST_S3_ENDPOINT")),
+          sourceS3AccessKey =
+            Some(required("BACKFILL_TEST_S3_SOURCE_ACCESS_KEY")),
+          sourceS3SecretKey =
+            Some(required("BACKFILL_TEST_S3_SOURCE_SECRET_KEY")),
+          sourceS3UseIam = Some(false),
+          sourceS3UseSSL = Some(false),
+          sourceS3Region = Some("us-east-1")
+        )
+        val source = fixture(root, config.storageProperties)
+        val catalog =
+          "backfillinput" + UUID.randomUUID().toString.replace("-", "")
+        val property = s"spark.sql.catalog.$catalog"
+        val warehouse = s"s3a://${base.s3BucketName}/source/$catalog/warehouse"
+        spark.conf.set(property, "org.apache.iceberg.spark.SparkCatalog")
+        spark.conf.set(property + ".type", "hadoop")
+        spark.conf.set(property + ".warehouse", warehouse)
+        hadoopOptions(config, warehouse).foreach { case (key, value) =>
           spark.conf.set(s"$property.hadoop.$key", value)
         }
-        val result = MilvusBackfill
-          .run(spark, s"$catalog.db.rows", source.snapshot.toString, config)
-          .fold(
-            error => {
-              error.cause.foreach(_.printStackTrace())
-              fail(
-                error.message,
-                error.cause.getOrElse(new IllegalStateException(error.message))
-              )
-            },
-            identity
-          )
-        assert(result.inputSnapshotId.nonEmpty)
-        assert(
-          mapper
-            .readTree(result.toJson)
-            .get("inputSnapshotId")
-            .asLong() == result.inputSnapshotId.get
+        spark.sql(
+          s"CREATE TABLE $catalog.db.rows (pk BIGINT, n BIGINT) USING iceberg"
         )
-        assertRows(
-          read(config.storageProperties, source, Some(result)),
-          Some("overwrite")
+        spark.sql(
+          s"INSERT INTO $catalog.db.rows VALUES (1, NULL), (2, 200), (3, 300), (5, 500), (99, 9900)"
         )
-        target.foreach { case (key, value) => assert(conf.get(key) == value) }
-      } finally
-        previous.foreach { case (key, value) =>
-          value match {
-            case Some(text) => conf.set(key, text)
-            case None       => conf.unset(key)
+        val conf = spark.sparkContext.hadoopConfiguration
+        val prefix = s"fs.s3a.bucket.${base.s3BucketName}."
+        val target = Map(
+          prefix + "access.key" -> base.s3AccessKey,
+          prefix + "secret.key" -> base.s3SecretKey,
+          prefix + "aws.credentials.provider" -> "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
+        )
+        val previous =
+          target.keys.map(key => key -> Option(conf.get(key))).toMap
+        try {
+          target.foreach { case (key, value) =>
+            conf.set(key, value)
+            spark.conf.set(s"$property.hadoop.$key", value)
           }
-        }
+          val result = MilvusBackfill
+            .run(spark, s"$catalog.db.rows", source.snapshot.toString, config)
+            .fold(
+              error => {
+                error.cause.foreach(_.printStackTrace())
+                fail(
+                  error.message,
+                  error.cause
+                    .getOrElse(new IllegalStateException(error.message))
+                )
+              },
+              identity
+            )
+          assert(result.inputSnapshotId.nonEmpty)
+          assert(
+            mapper
+              .readTree(result.toJson)
+              .get("inputSnapshotId")
+              .asLong() == result.inputSnapshotId.get
+          )
+          assertRows(
+            read(config.storageProperties, source, Some(result)),
+            Some("overwrite")
+          )
+          target.foreach { case (key, value) => assert(conf.get(key) == value) }
+        } finally
+          previous.foreach { case (key, value) =>
+            value match {
+              case Some(text) => conf.set(key, text)
+              case None       => conf.unset(key)
+            }
+          }
+      }
     }
-  }
 }

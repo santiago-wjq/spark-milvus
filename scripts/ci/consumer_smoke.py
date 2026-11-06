@@ -31,6 +31,9 @@ MAIN = "com.zilliz.spark.connector.read.ReadOnlyConsumerSmoke"
 BACKFILL_MAIN = "com.zilliz.spark.connector.backfill.BackfillConsumerSmoke"
 BACKFILL_FIXTURES = ("backfill/src/test/scala/com/zilliz/spark/connector/backfill/BackfillConsumerSmoke.scala",)
 BACKFILL_CHECKS = ("independent-executor", "backfill-v3-consumer", "backfill-result-json", "backfill-offline-boundary")
+# The Spark lines the backfill module is built for. Its consumer backfills from an
+# in-memory DataFrame, so no check needs Iceberg and every line runs them all.
+BACKFILL_LINES = ("4.0", "4.2")
 FIXTURE_ROOT = ROOT / "core/src/test/resources/read-fixtures"
 FIXTURE_GROUPS = ("collections/nearest",)
 REQUIRED_CHECKS = (
@@ -131,10 +134,14 @@ def main_jars(manifest):
     }
 
 
+def backfill_entry(line):
+    return f"spark-milvus-backfill-{line}_2.13"
+
+
 def expected_artifacts(manifest, line, platform, entry):
     if entry in ("thin", "backfill"):
-        if entry == "backfill" and line != "4.0":
-            raise ValueError("Backfill consumer supports only Spark 4.0")
+        if entry == "backfill" and line not in BACKFILL_LINES:
+            raise ValueError("Backfill consumer supports only Spark " + " and ".join(BACKFILL_LINES))
         # Every line's thin module resolves the same shared modules below it.
         entry_id = f"spark-milvus-{line}-thin_2.13"
         names = {
@@ -142,7 +149,7 @@ def expected_artifacts(manifest, line, platform, entry):
             "spark-milvus-native-storage_2.13", "spark-milvus-core_2.13", entry_id,
         }
         if entry == "backfill":
-            entry_id = "spark-milvus-backfill-4.0_2.13"
+            entry_id = backfill_entry(line)
             names.add(entry_id)
         available = main_jars(manifest)
         missing = names - available.keys()
@@ -280,7 +287,7 @@ def collect_diagnostics(spark_home, work, output, previous_apps):
 
 
 def compile_fixture(work, repository, version, row, entry_id, env):
-    backfill = entry_id == "spark-milvus-backfill-4.0_2.13"
+    backfill = entry_id in {backfill_entry(line) for line in BACKFILL_LINES}
     project = work / "fixture"
     (project / "project").mkdir(parents=True)
     sources = project / "src/main/scala"

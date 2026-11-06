@@ -69,6 +69,39 @@ class WorkflowGateTest(unittest.TestCase):
         self.assertLess(steps.index(start), steps.index(read))
         self.assertLess(steps.index(read), steps.index(stop))
 
+    def test_every_backfill_line_runs_unit_native_and_consumer_checks(self):
+        jobs = workflow("ci.yml")["jobs"]
+        # The default line's backfill unit tests run in build-and-test; the 4.2
+        # source lane runs its own after the clean contract, before the upload.
+        steps = jobs["spark-sources"]["steps"]
+        source = next(step for step in steps if "read_validation.py spark" in step.get("run", ""))
+        unit = next(step for step in steps if "backfill/test" in step.get("run", ""))
+        upload = next(step for step in steps if step.get("uses", "").startswith("actions/upload-artifact"))
+        self.assertEqual(unit["if"], "matrix.line == '4.2'")
+        self.assertEqual(unit["env"], {"SPARK_LINE": "${{ matrix.line }}", "SCALA_VERSION": "${{ matrix.scala }}"})
+        self.assertIn('"-DsparkVersion=$SPARK_LINE" "-DscalaVersion=$SCALA_VERSION"', unit["run"])
+        self.assertIn("backfill/NativeTest/compile", unit["run"])
+        self.assertLess(steps.index(source), steps.index(unit))
+        self.assertLess(steps.index(unit), steps.index(upload))
+        lines = "matrix.line == '4.0' || matrix.line == '4.2'"
+        steps = jobs["spark-native"]["steps"]
+        start = next(step for step in steps if "input_storage.py start" in step.get("run", ""))
+        native = next(step for step in steps if "read_validation.py backfill" in step.get("run", ""))
+        stop = next(step for step in steps if "input_storage.py stop" in step.get("run", ""))
+        self.assertEqual(start["if"], lines)
+        self.assertEqual(native["if"], lines)
+        self.assertEqual(stop["if"], "always() && (" + lines + ")")
+        self.assertIn("--line '${{ matrix.line }}'", native["run"])
+        self.assertIn("--native-bundle", native["run"])
+        self.assertLess(steps.index(start), steps.index(native))
+        self.assertLess(steps.index(native), steps.index(stop))
+        # Every consumer line also consumes its own backfill module.
+        consumer = workflow("integration.yml")["jobs"]["consumer"]["steps"]
+        backfill = next(step for step in consumer if "--entry backfill" in step.get("run", ""))
+        self.assertNotIn("if", backfill)
+        self.assertEqual(backfill["env"]["SPARK_LINE"], "${{ matrix.line }}")
+        self.assertIn('--line "$SPARK_LINE"', backfill["run"])
+
     def test_helm_lints_the_service_free_read_mode(self):
         steps = workflow("ci.yml")["jobs"]["integration-helm"]["steps"]
         lint = next(step for step in steps if "helm lint" in step.get("run", ""))

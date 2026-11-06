@@ -215,52 +215,56 @@ final class InputIdentityNativeTest
     assert(sharedConfiguration == before)
   }
 
-  test(
-    "Iceberg metadata and executor data reads use the bound identity and pinned snapshot"
-  ) {
-    Seq(
-      ("sourceinput", "source", source, 11),
-      ("targetinput", "target", target, 22)
-    ).foreach { case (catalog, prefix, identity, value) =>
-      val property = s"spark.sql.catalog.$catalog"
-      spark.conf.set(property, "org.apache.iceberg.spark.SparkCatalog")
-      spark.conf.set(property + ".type", "hadoop")
-      spark.conf.set(
-        property + ".warehouse",
-        s"s3a://$bucket/$prefix/$run/warehouse"
-      )
-      identity.hadoopOptions.foreach { case (key, setting) =>
-        spark.conf.set(s"$property.hadoop.$key", setting)
+  // Lines without an Iceberg runtime cover the refusal in IcebergInputTest.
+  if (IcebergInput.available)
+    test(
+      "Iceberg metadata and executor data reads use the bound identity and pinned snapshot"
+    ) {
+      Seq(
+        ("sourceinput", "source", source, 11),
+        ("targetinput", "target", target, 22)
+      ).foreach { case (catalog, prefix, identity, value) =>
+        val property = s"spark.sql.catalog.$catalog"
+        spark.conf.set(property, "org.apache.iceberg.spark.SparkCatalog")
+        spark.conf.set(property + ".type", "hadoop")
+        spark.conf.set(
+          property + ".warehouse",
+          s"s3a://$bucket/$prefix/$run/warehouse"
+        )
+        identity.hadoopOptions.foreach { case (key, setting) =>
+          spark.conf.set(s"$property.hadoop.$key", setting)
+        }
+        spark.sql(s"CREATE TABLE $catalog.db.rows (id BIGINT) USING iceberg")
+        spark.sql(s"INSERT INTO $catalog.db.rows VALUES ($value)")
       }
-      spark.sql(s"CREATE TABLE $catalog.db.rows (id BIGINT) USING iceberg")
-      spark.sql(s"INSERT INTO $catalog.db.rows VALUES ($value)")
+      val before = sharedConfiguration
+      val left =
+        openInput(spark, "sourceinput.db.rows", InputOptions("iceberg"), source)
+      val right =
+        openInput(spark, "targetinput.db.rows", InputOptions("iceberg"), target)
+      spark.sql("INSERT INTO sourceinput.db.rows VALUES (33)")
+      assert(
+        left.icebergSnapshotId.nonEmpty && right.icebergSnapshotId.nonEmpty
+      )
+      assert(left.dataFrame.collect().map(_.getLong(0)).toSeq == Seq(11L))
+      assert(right.dataFrame.collect().map(_.getLong(0)).toSeq == Seq(22L))
+      assert(left.dataFrame.collect().map(_.getLong(0)).toSeq == Seq(11L))
+      intercept[Exception] {
+        openInput(
+          spark,
+          "sourceinput.db.rows",
+          InputOptions("iceberg"),
+          target
+        ).dataFrame.collect()
+      }
+      intercept[Exception] {
+        openInput(
+          spark,
+          "targetinput.db.rows",
+          InputOptions("iceberg"),
+          source
+        ).dataFrame.collect()
+      }
+      assert(sharedConfiguration == before)
     }
-    val before = sharedConfiguration
-    val left =
-      openInput(spark, "sourceinput.db.rows", InputOptions("iceberg"), source)
-    val right =
-      openInput(spark, "targetinput.db.rows", InputOptions("iceberg"), target)
-    spark.sql("INSERT INTO sourceinput.db.rows VALUES (33)")
-    assert(left.icebergSnapshotId.nonEmpty && right.icebergSnapshotId.nonEmpty)
-    assert(left.dataFrame.collect().map(_.getLong(0)).toSeq == Seq(11L))
-    assert(right.dataFrame.collect().map(_.getLong(0)).toSeq == Seq(22L))
-    assert(left.dataFrame.collect().map(_.getLong(0)).toSeq == Seq(11L))
-    intercept[Exception] {
-      openInput(
-        spark,
-        "sourceinput.db.rows",
-        InputOptions("iceberg"),
-        target
-      ).dataFrame.collect()
-    }
-    intercept[Exception] {
-      openInput(
-        spark,
-        "targetinput.db.rows",
-        InputOptions("iceberg"),
-        source
-      ).dataFrame.collect()
-    }
-    assert(sharedConfiguration == before)
-  }
 }

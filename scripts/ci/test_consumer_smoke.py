@@ -149,14 +149,49 @@ class ConsumerTest(unittest.TestCase):
                         consumer.check_resolved(self.ivy, expected)
                     self.keep(expected)
 
-    def test_backfill_resolves_its_module_above_the_spark_4_0_thin_closure(self):
+    def backfill_manifest(self):
         manifest = self.thin_manifest()
-        manifest["artifacts"].append(self.jar("spark-milvus-backfill-4.0_2.13"))
-        entry, expected = consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "backfill")
-        self.assertEqual(entry, "spark-milvus-backfill-4.0_2.13")
-        self.assertEqual(set(expected), self.SHARED_THIN | {"spark-milvus-4.0-thin_2.13", entry})
-        with self.assertRaisesRegex(ValueError, "^Backfill consumer supports only Spark 4.0$"):
+        for line in ("4.0", "4.2"):
+            manifest["artifacts"].append(self.jar(f"spark-milvus-backfill-{line}_2.13"))
+        return manifest
+
+    def test_backfill_resolves_its_module_above_its_line_thin_closure(self):
+        for line, other in (("4.0", "4.2"), ("4.2", "4.0")):
+            with self.subTest(line=line):
+                manifest = self.backfill_manifest()
+                entry, expected = consumer.expected_artifacts(manifest, line, "linux-x86_64", "backfill")
+                self.assertEqual(entry, f"spark-milvus-backfill-{line}_2.13")
+                # Only this line's thin and backfill modules sit above the shared closure.
+                self.assertEqual(set(expected), self.SHARED_THIN | {f"spark-milvus-{line}-thin_2.13", entry})
+                self.keep(expected)
+                self.assertEqual(len(consumer.check_resolved(self.ivy, expected)), 5)
+                self.jar(f"spark-milvus-backfill-{other}_2.13")
+                with self.assertRaisesRegex(RuntimeError, "different connector artifacts"):
+                    consumer.check_resolved(self.ivy, expected)
+        manifest = self.backfill_manifest()
+        with self.assertRaisesRegex(ValueError, "^Backfill consumer supports only Spark 4.0 and 4.2$"):
+            consumer.expected_artifacts(manifest, "4.1", "linux-x86_64", "backfill")
+        manifest["artifacts"] = [item for item in manifest["artifacts"]
+                                 if item["artifactId"] != "spark-milvus-backfill-4.2_2.13"]
+        with self.assertRaisesRegex(ValueError, "missing thin artifacts: spark-milvus-backfill-4.2_2.13$"):
             consumer.expected_artifacts(manifest, "4.2", "linux-x86_64", "backfill")
+
+    def test_backfill_fixture_compiles_only_the_backfill_entry_on_each_line(self):
+        for line, spark in (("4.0", "4.0.1"), ("4.2", "4.2.0")):
+            with self.subTest(line=line):
+                work = self.root / ("fixture-" + line)
+                with mock.patch.object(consumer, "fixture_resources", return_value={}), \
+                     mock.patch.object(consumer, "run"), \
+                     mock.patch.object(consumer, "verify_fixture_jar") as verify:
+                    consumer.compile_fixture(work, "file:///candidate", "2.0.0",
+                                             {"scala": "2.13.16", "spark": spark},
+                                             f"spark-milvus-backfill-{line}_2.13", {})
+                sources = sorted(path.name for path in (work / "fixture/src/main/scala").iterdir())
+                self.assertEqual(sources, ["BackfillConsumerSmoke.scala"])
+                self.assertEqual(verify.call_args.args[2], (consumer.BACKFILL_MAIN.replace(".", "/"),))
+                build = (work / "fixture/build.sbt").read_text()
+                self.assertIn(f'"com.zilliz" % "spark-milvus-backfill-{line}_2.13" % "2.0.0"', build)
+                self.assertIn(f'"spark-sql" % "{spark}" % "provided"', build)
 
     def test_thin_rejects_native_resources_in_transitive_dependencies(self):
         manifest = self.thin_manifest()

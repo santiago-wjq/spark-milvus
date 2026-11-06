@@ -26,7 +26,7 @@ lazy val root = project
   .in(file("."))
   .aggregate(
     (Seq[ProjectReference](nativeRuntime, nativeStorage, core, spark) ++
-      (if (Versions.selected.id == "4.0") Seq[ProjectReference](backfill)
+      (if (Versions.selectedBackfill.isDefined) Seq[ProjectReference](backfill)
        else Seq.empty)): _*
   )
   .settings(
@@ -245,7 +245,9 @@ lazy val spark = Project("spark", file("spark"))
   .settings(lineBundle(Versions.selected))
 
 // Optional offline backfill calculation and input bindings. The reader graph
-// remains independent of this application layer and of Iceberg.
+// remains independent of this application layer and of Iceberg. Iceberg input
+// compiles only on lines with an Iceberg runtime; Modules.backfillSources
+// selects its source root.
 lazy val BackfillNativeTest = config("nativeTest") extend Test
 lazy val backfill = Project("backfill", file("backfill"))
   .dependsOn(
@@ -267,11 +269,11 @@ lazy val backfill = Project("backfill", file("backfill"))
     publish / skip := true,
     libraryDependencies ++= Dependencies.sparkDeps(Versions.selected) ++ Seq(
       scalaTest % Test,
-      "org.apache.iceberg" %% "iceberg-spark-runtime-4.0" % Versions.iceberg % "provided,test",
       hadoopAws.withConfigurations(Some("test")),
       "org.apache.hadoop" % "hadoop-aliyun" % Versions.selected.hadoop % Test
-    ),
+    ) ++ Dependencies.iceberg(Versions.selected),
     dependencyOverrides ++= Dependencies.lineOverrides(Versions.selected),
+    Modules.backfillSources(Versions.selected),
     inConfig(Test)(Modules.nativeTest),
     inConfig(BackfillNativeTest)(Modules.nativeTest),
     BackfillNativeTest / testOptions += Tests.Argument(
@@ -288,8 +290,9 @@ lazy val backfill = Project("backfill", file("backfill"))
     BackfillNativeTest / unmanagedResourceDirectories += (core / Test / resourceDirectory).value,
     Compile / compile := {
       require(
-        Versions.selected.id == "4.0",
-        "Backfill currently supports Spark 4.0 only"
+        Versions.selectedBackfill.isDefined,
+        s"Backfill supports Spark ${Versions.backfillLines.map(_.id).mkString(" and ")} " +
+          s"with Scala 2.13 only, not Spark ${Versions.selected.id} with Scala ${Versions.selectedScala}"
       )
       (Compile / compile).value
     },
