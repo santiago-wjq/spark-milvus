@@ -9,10 +9,9 @@ import org.slf4j.LoggerFactory
 
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.io.{
-  NativeWritableObjectStore,
-  WritableObjectStore
+  NativeObjectStore,
+  NativeWritableObjectStore
 }
-import com.zilliz.milvus.storage.io.NativeObjectStore
 import com.zilliz.milvus.storage.path.StoragePath
 import com.zilliz.milvus.storage.write.WriterResources
 import com.zilliz.spark.connector.input.InputStorageBinding
@@ -76,9 +75,7 @@ object BackfillStorage {
   ): Either[BackfillError, Unit] = {
     try {
       val (properties, key) = location(rawOutputPath, config)
-      val store = new NativeWritableObjectStore(
-        NativeObjectStore.Factory(properties).open()
-      )
+      val store = NativeWritableObjectStore.open(properties)
       WriterResources.closing(store.close()) {
         store.write(key, json.getBytes(StandardCharsets.UTF_8))
       }
