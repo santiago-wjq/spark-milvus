@@ -1,0 +1,48 @@
+package com.zilliz.milvus.storage.write
+
+import io.milvus.storage.MilvusStorageColumnGroups
+
+/** The column groups a V3 writer produced: for each group, its parquet files
+  * and their row counts. Wraps the C-allocated handle until closed, because a
+  * [[ManifestTransaction]] hands the same handle back to the C layer.
+  */
+final class WrittenColumnGroups private[write] (handle: Long)
+    extends AutoCloseable {
+  private var released = false
+
+  private[write] def nativeHandle: Long = {
+    if (released) {
+      throw new IllegalStateException("column groups already released")
+    }
+    handle
+  }
+
+  def size: Int = MilvusStorageColumnGroups.count(nativeHandle)
+
+  /** Parquet files of group `index`, in row order. */
+  def files(index: Int): Seq[String] =
+    MilvusStorageColumnGroups.files(nativeHandle, index).toSeq
+
+  /** Row count of each file of group `index`, positionally. */
+  def rowCounts(index: Int): Seq[Long] =
+    MilvusStorageColumnGroups.fileRowCounts(nativeHandle, index).toSeq
+
+  /** Column names of group `index`, as the writer's Arrow schema named them. */
+  def columns(index: Int): Seq[String] =
+    MilvusStorageColumnGroups.columns(nativeHandle, index).toSeq
+
+  /** Physical format reported by the native writer for this group. */
+  def format(index: Int): String =
+    MilvusStorageColumnGroups.format(nativeHandle, index)
+
+  /** Rows of the segment: every group carries the same total. */
+  def rows: Long =
+    if (size == 0) 0L else rowCounts(0).sum
+
+  override def close(): Unit = synchronized {
+    if (!released) {
+      released = true
+      MilvusStorageColumnGroups.destroy(handle)
+    }
+  }
+}

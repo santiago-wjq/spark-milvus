@@ -1,9 +1,9 @@
 package com.zilliz.spark.connector
 
-/** Public read/search options and driver-side storage configuration.
-  * `StorageOptions` and `HadoopStorageKeys` translate effective storage aliases
-  * and per-bucket identity into the canonical native fs.* properties.
-  * `MilvusOption` parses typed read limits, filters and fixed snapshot input;
-  * `SearchLimits` and `TaskResources` supply search execution limits.
+/** Public read and storage option parsing. MilvusOption describes snapshot
+  * selection, projections, scalar filters and read limits. StorageOptions and
+  * HadoopStorageKeys resolve per-input storage settings. OptionParsing provides
+  * strict shared value parsing; TaskResources describes executor resources and
+  * stage-level task core allocation.
   */
 package object options

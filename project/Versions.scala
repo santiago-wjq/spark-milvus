@@ -4,6 +4,13 @@ object Versions {
   val scala212 = "2.12.20"
   val scala213 = "2.13.16"
 
+  /** The optional backfill module on one Spark line. Its Iceberg input compiles
+    * against that line's `iceberg-spark-runtime` at `iceberg`; None where
+    * Iceberg publishes no runtime for the line, which then builds backfill with
+    * an Iceberg reader that refuses Iceberg input before reading.
+    */
+  final case class Backfill(iceberg: Option[String])
+
   /** A supported Spark line; all lines compile the same selected sbt project.
     */
   final case class SparkLine(
@@ -19,7 +26,11 @@ object Versions {
         * Netty 4.1.118 fails at the first buffer.
         */
       hadoop: String,
-      netty: String
+      netty: String,
+      /** Present on the lines the optional backfill module builds on, with
+        * Scala 2.13 only.
+        */
+      backfill: Option[Backfill] = None
   )
 
   /** Compile against the compatibility floor, with the Arrow version that Spark
@@ -44,7 +55,8 @@ object Versions {
       "17",
       Seq(scala213),
       hadoop = "3.4.1",
-      netty = "4.1.118.Final"
+      netty = "4.1.118.Final",
+      backfill = Some(Backfill(iceberg = Some("1.10.2")))
     ),
     SparkLine(
       "4.1",
@@ -64,7 +76,9 @@ object Versions {
       "17",
       Seq(scala213),
       hadoop = "3.5.0",
-      netty = "4.2.13.Final"
+      netty = "4.2.13.Final",
+      // Iceberg publishes no Spark 4.2 runtime yet.
+      backfill = Some(Backfill(iceberg = None))
     )
   )
 
@@ -92,6 +106,13 @@ object Versions {
     )
     requested
   }
+
+  /** The lines the optional backfill module builds on. */
+  val backfillLines: Seq[SparkLine] = lines.filter(_.backfill.isDefined)
+
+  /** The selected line's backfill; None where backfill does not build. */
+  val selectedBackfill: Option[Backfill] =
+    selected.backfill.filter(_ => selectedScala.startsWith("2.13."))
 
   /** Shared modules must remain loadable on the 3.5 line's Java baseline. */
   val sharedJavaRelease = "11"
@@ -126,7 +147,7 @@ object Versions {
     )
     val shared = sharedScalas.map { scala =>
       val modules = Seq("native-storage", "core") ++
-        (if (scala == scala213) Seq("native-runtime", "native-vector")
+        (if (scala == scala213) Seq("native-runtime")
          else Seq.empty)
       JSONObject(
         Map(

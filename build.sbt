@@ -15,6 +15,7 @@ import ThinArtifacts.{releaseThinArtifacts, thinModule}
 // Shared defaults. Per-line Scala and Java settings live in Modules.
 ThisBuild / scalaVersion := Versions.selectedScala
 ThisBuild / versionScheme := Some("early-semver")
+ThisBuild / version := connectorVersion
 
 // Runtime resources must follow every production dependency edge without
 // making Compile resolve or validate the host's native bundle.
@@ -23,7 +24,11 @@ lazy val compileAndRuntime = "compile->compile;runtime->runtime"
 // The root is an aggregate only. Select one Spark line per sbt invocation.
 lazy val root = project
   .in(file("."))
-  .aggregate(nativeRuntime, nativeStorage, nativeVector, core, spark)
+  .aggregate(
+    (Seq[ProjectReference](nativeRuntime, nativeStorage, core, spark) ++
+      (if (Versions.selectedBackfill.isDefined) Seq[ProjectReference](backfill)
+       else Seq.empty)): _*
+  )
   .settings(
     name := "spark-milvus",
     ReadValidation.matrixSettings,
@@ -38,8 +43,7 @@ lazy val root = project
     releaseThinArtifacts := (spark / releaseThinArtifacts).value
   )
 
-// Layer 1: upstream native bindings. Storage's Scala API is cross-built;
-// Knowhere's API is plain Java.
+// Layer 1: one component-neutral runtime and cross-built Storage bindings.
 lazy val nativeRuntime = Project("native-runtime", file("native/runtime"))
   .settings(
     name := "native-runtime",
@@ -63,6 +67,7 @@ lazy val nativeStorage = Project("native-storage", file("native/storage"))
     moduleName := "spark-milvus-native-storage",
     Modules.sparkFreeModuleSettings,
     ThinArtifacts.settings("native-storage", Versions.sharedJavaRelease),
+    NativeBundle.storageBindingSettings,
     ReadValidation.artifactSettings,
     // Native libraries reach the build only through the unified bundle. A
     // native/ directory here is left by the storage-only build that copied
@@ -112,25 +117,6 @@ lazy val nativeStorage = Project("native-storage", file("native/storage"))
     publish / skip := true
   )
 
-lazy val nativeVector = Project("native-vector", file("native/vector"))
-  .dependsOn(nativeRuntime % compileAndRuntime)
-  .settings(
-    name := "native-vector",
-    moduleName := "spark-milvus-native-vector",
-    Modules.javaOnly,
-    KnowhereBuild.settings,
-    ThinArtifacts.settings("native-vector", Versions.sharedJavaRelease),
-    ReadValidation.artifactSettings,
-    NativeBundle.validatedNativeBundle := (nativeRuntime / NativeBundle.validatedNativeBundle).value,
-    KnowhereBuild.knowhereRuntimeJar := (nativeRuntime / Compile / packageBin).value,
-    libraryDependencies ++= Seq(
-      "junit" % "junit" % "4.13.2" % Test,
-      "com.github.sbt" % "junit-interface" % "0.13.3" % Test
-    ),
-    Test / fork := true,
-    publish / skip := true
-  )
-
 lazy val milvusProtoDir =
   Def.setting((ThisBuild / baseDirectory).value / "milvus-proto" / "proto")
 
@@ -139,8 +125,7 @@ lazy val milvusProtoDir =
 lazy val core = project
   .in(file("core"))
   .dependsOn(
-    nativeStorage % compileAndRuntime,
-    nativeVector % compileAndRuntime
+    nativeStorage % compileAndRuntime
   )
   .settings(
     name := "core",
@@ -229,7 +214,6 @@ lazy val spark = Project("spark", file("spark"))
       val options = (Test / forkOptions).value
       groups.flatMap { group =>
         val isolatedNames = Set(
-          "com.zilliz.spark.connector.search.SearchMergeTest",
           "com.zilliz.spark.connector.read.V3ReadContractTest"
         )
         val (isolated, remaining) =
@@ -260,6 +244,81 @@ lazy val spark = Project("spark", file("spark"))
   )
   .settings(lineBundle(Versions.selected))
 
+// Optional offline backfill calculation and input bindings. The reader graph
+// remains independent of this application layer and of Iceberg. Iceberg input
+// compiles only on lines with an Iceberg runtime; Modules.backfillSources
+// selects its source root.
+lazy val BackfillNativeTest = config("nativeTest") extend Test
+lazy val backfill = Project("backfill", file("backfill"))
+  .dependsOn(
+    spark % s"$compileAndRuntime;test->test",
+    core % s"$compileAndRuntime;test->test"
+  )
+  .configs(BackfillNativeTest)
+  .settings(inConfig(BackfillNativeTest)(Defaults.testSettings))
+  .settings(
+    inConfig(BackfillNativeTest)(
+      org.scalafmt.sbt.ScalafmtPlugin.scalafmtConfigSettings
+    )
+  )
+  .settings(
+    name := "backfill",
+    moduleName := s"spark-milvus-backfill-${Versions.selected.id}",
+    Modules.perLine(Versions.selected),
+    ThinArtifacts.settings("backfill", Versions.selected.javaRelease),
+    publish / skip := true,
+    libraryDependencies ++= Dependencies.sparkDeps(Versions.selected) ++ Seq(
+      scalaTest % Test,
+      hadoopAws.withConfigurations(Some("test")),
+      "org.apache.hadoop" % "hadoop-aliyun" % Versions.selected.hadoop % Test
+    ) ++ Dependencies.iceberg(Versions.selected),
+    dependencyOverrides ++= Dependencies.lineOverrides(Versions.selected),
+    Modules.backfillSources(Versions.selected),
+    inConfig(Test)(Modules.nativeTest),
+    inConfig(BackfillNativeTest)(Modules.nativeTest),
+    BackfillNativeTest / testOptions += Tests.Argument(
+      TestFrameworks.ScalaTest,
+      "-u",
+      (target.value / "native-test-reports").getAbsolutePath
+    ),
+    assembly / assemblyJarName := s"spark-milvus-backfill-${Versions.selected.id}_${scalaBinaryVersion.value}-${version.value}.jar",
+    Compile / mainClass := Some(
+      "com.zilliz.spark.connector.backfill.BackfillApp"
+    ),
+    Modules.backfillBoundary,
+    BackfillNativeTest / dependencyClasspath ++= (Test / fullClasspath).value,
+    BackfillNativeTest / unmanagedResourceDirectories += (core / Test / resourceDirectory).value,
+    Compile / compile := {
+      require(
+        Versions.selectedBackfill.isDefined,
+        s"Backfill supports Spark ${Versions.backfillLines.map(_.id).mkString(" and ")} " +
+          s"with Scala 2.13 only, not Spark ${Versions.selected.id} with Scala ${Versions.selectedScala}"
+      )
+      (Compile / compile).value
+    },
+    releaseThinArtifacts / aggregate := false,
+    releaseThinArtifacts := ThinArtifacts.export(
+      (ThisBuild / baseDirectory).value,
+      Versions.selected,
+      scalaVersion.value,
+      scalaBinaryVersion.value,
+      Seq(
+        (nativeRuntime / thinModule).value,
+        (nativeStorage / thinModule).value,
+        (core / thinModule).value,
+        (spark / thinModule).value,
+        thinModule.value
+      ),
+      (Compile / fullClasspath).value ++ (Runtime / managedClasspath).value ++ (spark / Compile / fullClasspath).value,
+      javaHome.value.getOrElse(file(sys.props("java.home"))),
+      streams.value.log
+    )
+  )
+  .settings(lineBundle(Versions.selected))
+  .settings(
+    assembly / assemblyJarName := s"spark-milvus-backfill-${Versions.selected.id}_${scalaBinaryVersion.value}-${version.value}.jar"
+  )
+
 // Spark Connect on the 4.x lines. The suite runs the server in its own JVM,
 // beside the classic session, and starts the client as a JVM of its own: the
 // client jar carries the sql-api classes rebuilt against a relocated Arrow,
@@ -288,8 +347,6 @@ def connectClient(l: Versions.SparkLine): Seq[Setting[_]] = Seq(
 
 // Thin candidates preserve module boundaries for downstream compilation. Their
 // POMs and manifests receive release coordinates without changing local modules.
-// Every release line passes the whole closure and exports its spark module;
-// only ThinArtifacts.sharedModulesLine also exports the four modules below it.
 lazy val thinReleaseSettings: Seq[Setting[_]] =
   ThinArtifacts.settings("spark", Versions.selected.javaRelease) ++ Seq(
     releaseThinArtifacts / aggregate := false,
@@ -301,12 +358,10 @@ lazy val thinReleaseSettings: Seq[Setting[_]] =
       Seq(
         (nativeRuntime / thinModule).value,
         (nativeStorage / thinModule).value,
-        (nativeVector / thinModule).value,
         (core / thinModule).value,
         thinModule.value
       ),
       (Compile / fullClasspath).value ++ (Runtime / managedClasspath).value,
-      (nativeVector / KnowhereBuild.knowhereApiJar).value,
       javaHome.value.getOrElse(file(sys.props("java.home"))),
       streams.value.log
     )
@@ -345,14 +400,11 @@ def jvmReleaseSettings(l: Versions.SparkLine): Seq[Setting[_]] =
     releaseJvmSourceMappings :=
       (nativeRuntime / Compile / packageSrc / mappings).value ++
         (nativeStorage / Compile / packageSrc / mappings).value ++
-        (nativeVector / Compile / packageSrc / mappings).value ++
         (core / Compile / packageSrc / mappings).value ++
-        (Compile / packageSrc / mappings).value ++
-        ReleaseArtifacts.upstreamSources((ThisBuild / baseDirectory).value),
+        (Compile / packageSrc / mappings).value,
     releaseJvmDocumentation := Seq(
       "native-runtime" -> (nativeRuntime / Compile / doc).value,
       "native-storage" -> (nativeStorage / Compile / doc).value,
-      "native-vector" -> (nativeVector / Compile / doc).value,
       "core" -> (core / Compile / doc).value,
       s"spark-${l.id}" -> (Compile / doc).value
     ),
@@ -456,10 +508,9 @@ lazy val fatJarRules: Seq[Setting[_]] = Seq(
     // Arrow JNI bindings contain hardcoded class names, so Arrow stays unshaded.
   ),
   assembly / assemblyMergeStrategy := {
-    // Knowhere's manifest checksums describe one complete native dependency set.
-    // Conflicting resources must fail packaging instead of selecting one copy.
-    case PathList("native", "knowhere", xs @ _*) =>
-      NativeBundle.nativeMergeStrategy
+    // Conflicting native resources must fail packaging.
+    case "META-INF/milvus-native/requirements.list" =>
+      MergeStrategy.filterDistinctLines
     case PathList("native", "milvus", xs @ _*) =>
       NativeBundle.nativeMergeStrategy
     case PathList("native", xs @ _*) => MergeStrategy.first
@@ -491,7 +542,7 @@ lazy val fatJarRules: Seq[Setting[_]] = Seq(
 ThisBuild / organizationName := "zilliz"
 ThisBuild / organizationHomepage := Some(url("https://zilliz.com/"))
 ThisBuild / description :=
-  "Read and search Milvus V3 snapshots directly from Apache Spark."
+  "Read and backfill Milvus V3 snapshots directly from Apache Spark."
 
 ThisBuild / licenses := List(
   "Server Side Public License v1" -> URI
@@ -570,10 +621,11 @@ lazy val gitBranch = {
 // name in the version so snapshots from two checkouts never share coordinates.
 lazy val ReleaseBranch = "(\\d+\\.\\d+)".r
 
-// The 2.0 version carried by the selected Spark bundle.
+// Development snapshots retain branch and architecture isolation. Immutable
+// CI candidates use their run/attempt identity through release.version.
 lazy val connectorVersion = ReleaseArtifacts.requestedVersion.getOrElse(
   gitBranch match {
-    case ReleaseBranch(line) => s"$line.0-$arch-SNAPSHOT"
-    case branch              => s"2.0.0-$branch-$arch-SNAPSHOT"
+    case ReleaseBranch(_) => s"2.1.0-$arch-SNAPSHOT"
+    case _                => s"2.1.0-$gitBranch-$arch-SNAPSHOT"
   }
 )

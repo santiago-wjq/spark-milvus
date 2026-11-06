@@ -1,0 +1,1031 @@
+package com.zilliz.spark.connector.backfill
+
+import org.apache.hadoop.conf.Configuration
+import org.scalatest.funsuite.AnyFunSuite
+import org.scalatest.matchers.should.Matchers
+
+import com.zilliz.milvus.storage.credential.StorageProperties
+
+/** Unit tests for BackfillConfig validation and options generation
+  */
+class BackfillConfigTest extends AnyFunSuite with Matchers {
+
+  test("delta output requires an explicit recognized receiver capability") {
+    val config = BackfillConfig.forTest("c")
+    config.receiverCapability shouldBe "legacy"
+    config.emitsManifestDelta shouldBe false
+    val delta = config.copy(receiverCapability = "manifest-delta-v1")
+    delta.validate() shouldBe Right(())
+    delta.emitsManifestDelta shouldBe true
+    Seq("auto", "delta", "", "manifest-delta-v1 ").foreach { capability =>
+      config
+        .copy(receiverCapability = capability)
+        .validate()
+        .left
+        .toOption
+        .get should
+        include("receiverCapability")
+    }
+  }
+
+  // ============ Validation Tests ============
+
+  test("backfill defaults to collection primary-key join") {
+    BackfillConfig.forTest("c").joinKey shouldBe BackfillJoinKey.PrimaryKey
+  }
+
+  test("backfill accepts an explicit physical-field join key") {
+    BackfillConfig
+      .forTest("c")
+      .copy(joinKey = BackfillJoinKey.PhysicalField("external_row_id"))
+      .validate() shouldBe Right(())
+  }
+
+  test("backfill rejects a blank physical-field join key") {
+    val error = BackfillConfig
+      .forTest("c")
+      .copy(joinKey = BackfillJoinKey.PhysicalField("  "))
+      .validate()
+      .left
+      .toOption
+      .get
+
+    error should include("cannot be blank")
+  }
+
+  test("Valid config passes validation") {
+    val config = BackfillConfig(
+      collectionName = "test_collection",
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "minioadmin",
+      s3SecretKey = "minioadmin"
+    )
+
+    config.validate() shouldBe Right(())
+    config.inputFormat shouldBe BackfillConfig.DefaultInputFormat
+  }
+
+  test("validate accepts implemented inputFormat (parquet)") {
+    BackfillConfig.ImplementedInputFormats.foreach { format =>
+      val config = BackfillConfig(
+        s3Endpoint = "localhost:9000",
+        s3BucketName = "test-bucket",
+        s3AccessKey = "minioadmin",
+        s3SecretKey = "minioadmin",
+        inputFormat = format
+      )
+      config.validate() shouldBe Right(())
+    }
+  }
+
+  test("validate rejects recognized-but-unimplemented inputFormats") {
+    val unimplemented =
+      BackfillConfig.AllowedInputFormats -- BackfillConfig.ImplementedInputFormats
+    unimplemented should not be empty
+    unimplemented.foreach { format =>
+      val config = BackfillConfig(
+        s3Endpoint = "localhost:9000",
+        s3BucketName = "test-bucket",
+        s3AccessKey = "minioadmin",
+        s3SecretKey = "minioadmin",
+        inputFormat = format
+      )
+      config.validate() match {
+        case Right(_) =>
+          fail(
+            s"expected validation error for unimplemented inputFormat '$format'"
+          )
+        case Left(message) =>
+          message should include("recognized but not yet implemented")
+      }
+    }
+  }
+
+  test("validate rejects unknown inputFormat") {
+    val config = BackfillConfig(
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "minioadmin",
+      s3SecretKey = "minioadmin",
+      inputFormat = "avro"
+    )
+    config.validate() match {
+      case Right(_) =>
+        fail("expected validation error for unknown inputFormat")
+      case Left(message) =>
+        message should include("inputFormat must be one of")
+        message should include("(got 'avro')")
+    }
+  }
+
+  test("validate accepts iceberg inputFormat with a valid snapshot id") {
+    val config = BackfillConfig(
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "minioadmin",
+      s3SecretKey = "minioadmin",
+      inputFormat = "iceberg",
+      icebergSnapshotId = Some("4325893492")
+    )
+    config.validate() shouldBe Right(())
+  }
+
+  test("validate accepts a whitespace-padded icebergSnapshotId") {
+    // validate() trims before parsing and readIceberg trims before passing the
+    // value to the snapshot-id option, so a padded id must not be rejected.
+    val config = BackfillConfig(
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "minioadmin",
+      s3SecretKey = "minioadmin",
+      inputFormat = "iceberg",
+      icebergSnapshotId = Some("  4325893492  ")
+    )
+    config.validate() shouldBe Right(())
+  }
+
+  test("validate rejects a non-integer icebergSnapshotId") {
+    val config = BackfillConfig(
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "minioadmin",
+      s3SecretKey = "minioadmin",
+      inputFormat = "iceberg",
+      icebergSnapshotId = Some("not-a-snapshot")
+    )
+    config.validate() match {
+      case Right(_) =>
+        fail("expected validation error for non-integer icebergSnapshotId")
+      case Left(message) =>
+        message should include(
+          "icebergSnapshotId must be an integer snapshot id"
+        )
+    }
+  }
+
+  test("validate rejects icebergSnapshotId for non-iceberg inputFormat") {
+    val config = BackfillConfig(
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "minioadmin",
+      s3SecretKey = "minioadmin",
+      inputFormat = "parquet",
+      icebergSnapshotId = Some("4325893492")
+    )
+    config.validate() match {
+      case Right(_) =>
+        fail("expected validation error for icebergSnapshotId without iceberg")
+      case Left(message) =>
+        message should include(
+          "icebergSnapshotId requires inputFormat='iceberg'"
+        )
+    }
+  }
+
+  test(
+    "Empty collectionName is allowed by validate() in snapshot mode"
+  ) {
+    // The required snapshot supplies the collection schema and identity.
+    val config = BackfillConfig(
+      collectionName = "",
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "minioadmin",
+      s3SecretKey = "minioadmin"
+    )
+
+    config.validate() shouldBe Right(())
+  }
+
+  test("validate accepts empty AK/SK when s3UseIam=true") {
+    val config = BackfillConfig(
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true
+    )
+    config.validate() shouldBe Right(())
+  }
+
+  test("Empty s3Endpoint fails validation") {
+    val config = BackfillConfig(
+      collectionName = "test_collection",
+      s3Endpoint = "",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "minioadmin",
+      s3SecretKey = "minioadmin"
+    )
+
+    config.validate() shouldBe Left("s3Endpoint cannot be empty")
+  }
+
+  test("Empty s3BucketName fails validation") {
+    val config = BackfillConfig(
+      collectionName = "test_collection",
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "",
+      s3AccessKey = "minioadmin",
+      s3SecretKey = "minioadmin"
+    )
+
+    config.validate() shouldBe Left("s3BucketName cannot be empty")
+  }
+
+  test("Unsupported s3CloudProvider fails validation") {
+    val config = BackfillConfig(
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "minioadmin",
+      s3SecretKey = "minioadmin",
+      s3CloudProvider = "oss"
+    )
+
+    config.validate() match {
+      case Left(error) => error should include("s3CloudProvider must be one of")
+      case Right(_)    => fail("expected invalid s3CloudProvider to fail")
+    }
+  }
+
+  test("Empty s3AccessKey/s3SecretKey is allowed (IAM/IRSA mode)") {
+    // Under IAM/IRSA the SDK falls back to the default AWS credentials chain,
+    // so empty static credentials must NOT fail validation.
+    val config = BackfillConfig(
+      collectionName = "test_collection",
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true
+    )
+
+    config.validate() shouldBe Right(())
+  }
+
+  test("Empty s3AccessKey/s3SecretKey without useIam is rejected") {
+    // Hard invariant: must use IAM or supply both AK and SK. Half-set or
+    // fully-empty static credentials without useIam are never valid.
+    val config = BackfillConfig(
+      collectionName = "test_collection",
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "",
+      s3SecretKey = ""
+    )
+
+    config.validate().isLeft shouldBe true
+  }
+
+  test("Half-set s3AccessKey without s3SecretKey is rejected") {
+    val config = BackfillConfig(
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "ak",
+      s3SecretKey = ""
+    )
+    config.validate().isLeft shouldBe true
+  }
+
+  test(
+    "Source bucket half-set credentials without sourceS3UseIam are rejected"
+  ) {
+    val config = BackfillConfig(
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "main-ak",
+      s3SecretKey = "main-sk",
+      sourceS3AccessKey = Some("src-ak"),
+      sourceS3SecretKey = Some("")
+    )
+    config.validate().isLeft shouldBe true
+  }
+
+  test("Source bucket override with sourceS3UseIam=true is accepted") {
+    val config = BackfillConfig(
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "main-ak",
+      s3SecretKey = "main-sk",
+      sourceS3AccessKey = Some(""),
+      sourceS3SecretKey = Some(""),
+      sourceS3UseIam = Some(true)
+    )
+    config.validate() shouldBe Right(())
+  }
+
+  test("AssumeRole settings require IAM mode and a role ARN") {
+    BackfillConfig(
+      s3Endpoint = "s3.amazonaws.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "ak",
+      s3SecretKey = "sk",
+      s3RoleArn = Some("arn:aws:iam::123456789012:role/data-role")
+    ).validate() shouldBe Left("s3RoleArn requires s3UseIam=true")
+
+    BackfillConfig(
+      s3Endpoint = "s3.amazonaws.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true,
+      s3RoleSessionName = Some("spark-job")
+    ).validate() shouldBe Left(
+      "s3RoleSessionName and s3ExternalId require s3RoleArn"
+    )
+  }
+
+  test(
+    "AssumeRole settings are accepted only for native AWS, Alibaba and Tencent storage"
+  ) {
+    Seq("aws", "aliyun", "tencent").foreach { provider =>
+      BackfillConfig(
+        s3Endpoint = "storage.example.com",
+        s3BucketName = "bucket",
+        s3AccessKey = "",
+        s3SecretKey = "",
+        s3CloudProvider = provider,
+        s3UseIam = true,
+        s3RoleArn = Some("role-arn")
+      ).validate() shouldBe Right(())
+    }
+
+    Seq("gcp", "azure", "huawei").foreach { provider =>
+      val error = BackfillConfig(
+        s3Endpoint = "storage.example.com",
+        s3BucketName = "bucket",
+        s3AccessKey = "",
+        s3SecretKey = "",
+        s3CloudProvider = provider,
+        s3UseIam = true,
+        s3RoleArn = Some("role-arn")
+      ).validate().left.toOption.get
+
+      error should include("s3RoleArn is supported only")
+    }
+  }
+
+  test("withHadoopStorageAssumeRole derives the AWS native main-storage role") {
+    val hadoopConf = new Configuration(false)
+    hadoopConf.set(
+      BackfillConfig.HadoopS3CredentialsProvider,
+      BackfillConfig.HadoopS3AssumedRoleProvider
+    )
+    hadoopConf.set(
+      BackfillConfig.HadoopS3AssumedRoleArn,
+      "arn:aws:iam::123456789012:role/data-role"
+    )
+    hadoopConf.set(
+      BackfillConfig.HadoopS3AssumedRoleExternalId,
+      "external-id"
+    )
+    val config = BackfillConfig(
+      s3Endpoint = "s3.amazonaws.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true
+    )
+
+    val resolved = config.withHadoopStorageAssumeRole(
+      hadoopConf,
+      "spark app/with invalid characters and a very long identifier 1234567890"
+    )
+
+    resolved.s3RoleArn shouldBe Some(
+      "arn:aws:iam::123456789012:role/data-role"
+    )
+    resolved.s3RoleSessionName.get should fullyMatch regex
+      "[A-Za-z0-9+=,.@-]{1,64}"
+    resolved.s3ExternalId shouldBe Some("external-id")
+    resolved.validate() shouldBe Right(())
+  }
+
+  test(
+    "withHadoopStorageAssumeRole derives the Alibaba native main-storage role"
+  ) {
+    val hadoopConf = new Configuration(false)
+    hadoopConf.set(
+      BackfillConfig.HadoopOssAssumedRoleArn,
+      "acs:ram::123456789012:role/spark-data-role"
+    )
+    hadoopConf.set(
+      BackfillConfig.HadoopOssAssumedRoleSessionName,
+      "spark-job"
+    )
+    hadoopConf.set(
+      BackfillConfig.HadoopOssAssumedRoleExternalId,
+      "external-id"
+    )
+    val config = BackfillConfig(
+      s3Endpoint = "oss-cn-hangzhou-internal.aliyuncs.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3CloudProvider = "aliyun",
+      s3UseIam = true
+    )
+
+    val resolved = config.withHadoopStorageAssumeRole(
+      hadoopConf,
+      "unused-default-session"
+    )
+
+    resolved.s3RoleArn shouldBe Some(
+      "acs:ram::123456789012:role/spark-data-role"
+    )
+    resolved.s3RoleSessionName shouldBe Some("spark-job")
+    resolved.s3ExternalId shouldBe Some("external-id")
+    resolved.validate() shouldBe Right(())
+  }
+
+  test(
+    "withHadoopStorageAssumeRole derives an AWS bucket-scoped native main-storage role"
+  ) {
+    val hadoopConf = new Configuration(false)
+    val prefix = "fs.s3a.bucket.bucket"
+    hadoopConf.set(
+      s"$prefix.aws.credentials.provider",
+      BackfillConfig.HadoopS3AssumedRoleProvider
+    )
+    hadoopConf.set(
+      s"$prefix.assumed.role.arn",
+      "arn:aws:iam::123456789012:role/bucket-role"
+    )
+    hadoopConf.set(s"$prefix.assumed.role.session.name", "bucket-session")
+    hadoopConf.set(s"$prefix.assumed.role.external.id", "bucket-external-id")
+    val config = BackfillConfig(
+      s3Endpoint = "s3.amazonaws.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true
+    )
+
+    val resolved = config.withHadoopStorageAssumeRole(
+      hadoopConf,
+      "spark-job"
+    )
+
+    resolved.s3RoleArn shouldBe Some(
+      "arn:aws:iam::123456789012:role/bucket-role"
+    )
+    resolved.s3RoleSessionName shouldBe Some("bucket-session")
+    resolved.s3ExternalId shouldBe Some("bucket-external-id")
+  }
+
+  test(
+    "withHadoopStorageAssumeRole resolves AWS provider and role from mixed scopes"
+  ) {
+    val hadoopConf = new Configuration(false)
+    val prefix = "fs.s3a.bucket.bucket"
+    hadoopConf.set(
+      BackfillConfig.HadoopS3CredentialsProvider,
+      BackfillConfig.HadoopS3AssumedRoleProvider
+    )
+    hadoopConf.set(
+      s"$prefix.assumed.role.arn",
+      "arn:aws:iam::123456789012:role/bucket-role"
+    )
+    hadoopConf.set(
+      BackfillConfig.HadoopS3AssumedRoleExternalId,
+      "global-external-id"
+    )
+    val config = BackfillConfig(
+      s3Endpoint = "s3.amazonaws.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true
+    )
+
+    val resolved = config.withHadoopStorageAssumeRole(
+      hadoopConf,
+      "spark-job"
+    )
+
+    resolved.s3RoleArn shouldBe Some(
+      "arn:aws:iam::123456789012:role/bucket-role"
+    )
+    resolved.s3RoleSessionName shouldBe Some("spark-job")
+    resolved.s3ExternalId shouldBe Some("global-external-id")
+  }
+
+  test(
+    "withHadoopStorageAssumeRole lets an AWS bucket provider use a global role ARN"
+  ) {
+    val hadoopConf = new Configuration(false)
+    val prefix = "fs.s3a.bucket.bucket"
+    hadoopConf.set(
+      s"$prefix.aws.credentials.provider",
+      BackfillConfig.HadoopS3AssumedRoleProvider
+    )
+    hadoopConf.set(
+      BackfillConfig.HadoopS3AssumedRoleArn,
+      "arn:aws:iam::123456789012:role/global-role"
+    )
+    val config = BackfillConfig(
+      s3Endpoint = "s3.amazonaws.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true
+    )
+
+    val resolved = config.withHadoopStorageAssumeRole(
+      hadoopConf,
+      "spark-job"
+    )
+
+    resolved.s3RoleArn shouldBe Some(
+      "arn:aws:iam::123456789012:role/global-role"
+    )
+  }
+
+  test("withHadoopStorageAssumeRole ignores missing Alibaba role config") {
+    val config = BackfillConfig(
+      s3Endpoint = "oss-cn-hangzhou-internal.aliyuncs.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3CloudProvider = "aliyun",
+      s3UseIam = true
+    )
+    val hadoopConf = new Configuration(false)
+
+    config.withHadoopStorageAssumeRole(hadoopConf, "spark-job") shouldBe config
+  }
+
+  test(
+    "withHadoopStorageAssumeRole rejects an incomplete Alibaba AssumeRole config"
+  ) {
+    val config = BackfillConfig(
+      s3Endpoint = "oss-cn-hangzhou-internal.aliyuncs.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3CloudProvider = "aliyun",
+      s3UseIam = true
+    )
+    val hadoopConf = new Configuration(false)
+    hadoopConf.set(
+      BackfillConfig.HadoopOssCredentialsProvider,
+      BackfillConfig.HadoopOssAssumedRoleProvider
+    )
+
+    val error = intercept[IllegalArgumentException] {
+      config.withHadoopStorageAssumeRole(hadoopConf, "spark-job")
+    }
+    error.getMessage should include(BackfillConfig.HadoopOssAssumedRoleArn)
+  }
+
+  test("withHadoopStorageAssumeRole ignores non-AssumeRole AWS config") {
+    val config = BackfillConfig(
+      s3Endpoint = "s3.amazonaws.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true
+    )
+    val hadoopConf = new Configuration(false)
+    hadoopConf.set(
+      BackfillConfig.HadoopS3AssumedRoleArn,
+      "arn:aws:iam::123456789012:role/data-role"
+    )
+
+    config.withHadoopStorageAssumeRole(hadoopConf, "spark-job") shouldBe config
+    val native = config.resolveStorage(hadoopConf)
+    native should not contain key(StorageProperties.RoleArn)
+    native should not contain key(StorageProperties.SessionName)
+    native should not contain key(StorageProperties.ExternalId)
+    hadoopConf.get(BackfillConfig.HadoopS3AssumedRoleArn) shouldBe
+      "arn:aws:iam::123456789012:role/data-role"
+  }
+
+  test(
+    "role ARN validation follows the selected identity in a provider chain"
+  ) {
+    val config = BackfillConfig(
+      s3Endpoint = "s3.amazonaws.com",
+      s3BucketName = "bucket",
+      s3UseIam = true
+    )
+    val conf = new Configuration(false)
+    conf.set(
+      BackfillConfig.HadoopS3CredentialsProvider,
+      "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider," +
+        BackfillConfig.HadoopS3AssumedRoleProvider
+    )
+    conf.set("fs.s3a.access.key", "static-key")
+    conf.set("fs.s3a.secret.key", "static-secret")
+    config.withHadoopStorageAssumeRole(conf, "spark-job") shouldBe config
+    val native = config.resolveStorage(conf)
+    native(StorageProperties.UseIam) shouldBe "true"
+    native should not contain key(StorageProperties.RoleArn)
+    native should not contain key(StorageProperties.AccessKeyId)
+    native should not contain key(StorageProperties.AccessKeyValue)
+    conf.get(BackfillConfig.HadoopS3AssumedRoleSessionName) shouldBe null
+
+    conf.unset("fs.s3a.access.key")
+    conf.unset("fs.s3a.secret.key")
+    val error = intercept[IllegalArgumentException] {
+      config.withHadoopStorageAssumeRole(conf, "spark-job")
+    }
+    error.getMessage should include(BackfillConfig.HadoopS3AssumedRoleArn)
+    intercept[IllegalArgumentException](config.resolveStorage(conf))
+    conf.get(BackfillConfig.HadoopS3AssumedRoleSessionName) shouldBe null
+  }
+
+  test(
+    "withHadoopStorageAssumeRole rejects an incomplete AWS AssumeRole config"
+  ) {
+    val config = BackfillConfig(
+      s3Endpoint = "s3.amazonaws.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true
+    )
+    val hadoopConf = new Configuration(false)
+
+    hadoopConf.set(
+      BackfillConfig.HadoopS3CredentialsProvider,
+      BackfillConfig.HadoopS3AssumedRoleProvider
+    )
+
+    val error = intercept[IllegalArgumentException] {
+      config.withHadoopStorageAssumeRole(hadoopConf, "spark-job")
+    }
+    error.getMessage should include(BackfillConfig.HadoopS3AssumedRoleArn)
+  }
+
+  test(
+    "withHadoopStorageAssumeRole does not apply AWS S3A roles to other providers"
+  ) {
+    val hadoopConf = new Configuration(false)
+    hadoopConf.set(
+      BackfillConfig.HadoopS3CredentialsProvider,
+      BackfillConfig.HadoopS3AssumedRoleProvider
+    )
+    hadoopConf.set(
+      BackfillConfig.HadoopS3AssumedRoleArn,
+      "arn:aws:iam::123456789012:role/data-role"
+    )
+    val config = BackfillConfig(
+      s3Endpoint = "cos.ap-shanghai.myqcloud.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3CloudProvider = "tencent",
+      s3UseIam = true
+    )
+
+    intercept[IllegalArgumentException](
+      config.withHadoopStorageAssumeRole(hadoopConf, "spark-job")
+    ).getMessage should include("TencentS3RoleCredentialsProvider")
+  }
+
+  test("Zero batchSize fails validation") {
+    val config = BackfillConfig(
+      collectionName = "test_collection",
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "minioadmin",
+      s3SecretKey = "minioadmin",
+      batchSize = 0
+    )
+
+    config.validate() shouldBe Left("batchSize must be positive")
+  }
+
+  test("Negative batchSize fails validation") {
+    val config = BackfillConfig(
+      collectionName = "test_collection",
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "minioadmin",
+      s3SecretKey = "minioadmin",
+      batchSize = -1
+    )
+
+    config.validate() shouldBe Left("batchSize must be positive")
+  }
+
+  // ============ Default Values Tests ============
+
+  test("Default values are set correctly") {
+    val config = BackfillConfig(
+      collectionName = "test_collection",
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "minioadmin",
+      s3SecretKey = "minioadmin"
+    )
+    config.databaseName shouldBe "default"
+    config.partitionName shouldBe None
+    config.s3UseSSL shouldBe false
+    config.s3RootPath shouldBe "files"
+    config.s3Region shouldBe "us-east-1"
+    config.s3CloudProvider shouldBe "aws"
+    config.batchSize shouldBe 1024
+  }
+
+  // ============ getMilvusReadOptions Tests ============
+
+  test("getMilvusReadOptions returns correct basic options") {
+    val config = BackfillConfig(
+      databaseName = "my_database",
+      collectionName = "test_collection",
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "access123",
+      s3SecretKey = "secret456",
+      s3RootPath = "data/milvus",
+      s3UseSSL = true
+    )
+
+    val options = config.getMilvusReadOptions
+
+    options should not contain key("milvus.uri")
+    options should not contain key("milvus.token")
+    options should not contain key("milvus.database.name")
+    options should not contain key("milvus.collection.name")
+    options("milvus.extra.columns") shouldBe "_segment_id,_row_offset"
+    options("fs.address") shouldBe "localhost:9000"
+    options("fs.bucket_name") shouldBe "test-bucket"
+    options("fs.root_path") shouldBe "data/milvus"
+    options("fs.access_key_id") shouldBe "access123"
+    options("fs.access_key_value") shouldBe "secret456"
+    options("fs.use_ssl") shouldBe "true"
+    options("fs.cloud_provider") shouldBe "aws"
+  }
+
+  test("snapshot reads do not select a service partition by name") {
+    val config = BackfillConfig(
+      collectionName = "test_collection",
+      partitionName = Some("partition_1"),
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "minioadmin",
+      s3SecretKey = "minioadmin"
+    )
+
+    val options = config.getMilvusReadOptions
+
+    options should not contain key("milvus.partition.name")
+  }
+
+  test("getMilvusReadOptions does not include partitionName when not set") {
+    val config = BackfillConfig(
+      collectionName = "test_collection",
+      partitionName = None,
+      s3Endpoint = "localhost:9000",
+      s3BucketName = "test-bucket",
+      s3AccessKey = "minioadmin",
+      s3SecretKey = "minioadmin"
+    )
+
+    val options = config.getMilvusReadOptions
+
+    options should not contain key("milvus.partition.name")
+  }
+
+  // ============ forTest Factory Method Tests ============
+
+  test("forTest creates config with default test values") {
+    val config = BackfillConfig.forTest(
+      collectionName = "test_collection"
+    )
+    config.collectionName shouldBe "test_collection"
+    config.s3Endpoint shouldBe "localhost:9000"
+    config.s3BucketName shouldBe "a-bucket"
+    config.s3AccessKey shouldBe "minioadmin"
+    config.s3SecretKey shouldBe "minioadmin"
+
+    // Should pass validation
+    config.validate() shouldBe Right(())
+  }
+
+  test("forTest allows overriding default values") {
+    val config = BackfillConfig.forTest(
+      collectionName = "custom_collection",
+      s3Endpoint = "custom:9000",
+      s3BucketName = "custom-bucket"
+    )
+    config.collectionName shouldBe "custom_collection"
+    config.s3Endpoint shouldBe "custom:9000"
+    config.s3BucketName shouldBe "custom-bucket"
+  }
+
+  test(
+    "withHadoopStorageAssumeRole refuses a chain that mixes a role with another source"
+  ) {
+    // Hadoop uses the environment's identity whenever it yields credentials
+    // and the role only after it; the native writer can take one of the two.
+    val hadoopConf = new Configuration(false)
+    hadoopConf.set(
+      BackfillConfig.HadoopS3CredentialsProvider,
+      "software.amazon.awssdk.auth.credentials.EnvironmentVariableCredentialsProvider," +
+        BackfillConfig.HadoopS3AssumedRoleProvider
+    )
+    hadoopConf.set(
+      BackfillConfig.HadoopS3AssumedRoleArn,
+      "arn:aws:iam::123456789012:role/data-role"
+    )
+    val config = BackfillConfig(
+      s3Endpoint = "s3.amazonaws.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true
+    )
+    intercept[IllegalArgumentException](
+      config.withHadoopStorageAssumeRole(hadoopConf, "spark-job")
+    )
+  }
+
+  test("Tencent main storage role reaches native read and write options") {
+    val conf = new Configuration(false)
+    conf.set(
+      "fs.s3a.aws.credentials.provider",
+      "com.zilliz.cloud.hadoop.TencentS3RoleCredentialsProvider"
+    )
+    conf.set("fs.s3a.assumed.role.arn", "qcs::cam::uin/123456:roleName/global")
+    conf.set(
+      "fs.s3a.bucket.bucket.assumed.role.arn",
+      "qcs::cam::uin/234567:roleName/data"
+    )
+    conf.set("fs.s3a.bucket.bucket.assumed.role.external.id", "tenant-id")
+    val config = BackfillConfig(
+      s3Endpoint = "cos.ap-shanghai.myqcloud.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3CloudProvider = "tencent",
+      s3UseIam = true
+    )
+    val resolved = config.withHadoopStorageAssumeRole(conf, "spark-job")
+    resolved.validate() shouldBe Right(())
+    resolved.s3RoleArn shouldBe Some("qcs::cam::uin/234567:roleName/data")
+    resolved.s3RoleSessionName shouldBe Some("spark-job")
+    resolved.s3ExternalId shouldBe Some("tenant-id")
+    Seq(
+      resolved.getMilvusReadOptions,
+      resolved.getS3WriteOptionsForBasePath("segment")
+    )
+      .foreach { options =>
+        options("fs.cloud_provider") shouldBe "tencent"
+        options("fs.role_arn") shouldBe "qcs::cam::uin/234567:roleName/data"
+        options("fs.external_id") shouldBe "tenant-id"
+        options("fs.session_name") shouldBe "spark-job"
+        options should not contain key("fs.access_key_id")
+      }
+  }
+
+  test(
+    "Tencent explicit role and static credentials take precedence over platform role lookup"
+  ) {
+    val config = BackfillConfig(
+      s3Endpoint = "cos.ap-shanghai.myqcloud.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3CloudProvider = "tencent",
+      s3UseIam = true,
+      s3RoleArn = Some("qcs::cam::uin/123456:roleName/explicit")
+    )
+    val conf = new Configuration(false)
+    config.withHadoopStorageAssumeRole(conf, "spark-job") shouldBe config
+    val static = config.copy(
+      s3RoleArn = None,
+      s3UseIam = false,
+      s3AccessKey = "ak",
+      s3SecretKey = "sk"
+    )
+    static.withHadoopStorageAssumeRole(conf, "spark-job") shouldBe static
+  }
+
+  test(
+    "Tencent Backfill rejects a blank bucket role without inheriting the global role"
+  ) {
+    val conf = new Configuration(false)
+    conf.set(
+      "fs.s3a.aws.credentials.provider",
+      "com.zilliz.cloud.hadoop.TencentS3RoleCredentialsProvider"
+    )
+    conf.set("fs.s3a.assumed.role.arn", "qcs::cam::uin/123456:roleName/global")
+    conf.set("fs.s3a.bucket.bucket.assumed.role.arn", " ")
+    val config = BackfillConfig(
+      s3Endpoint = "cos.ap-shanghai.myqcloud.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3CloudProvider = "tencent",
+      s3UseIam = true
+    )
+    intercept[IllegalArgumentException](
+      config.withHadoopStorageAssumeRole(conf, "spark-job")
+    ).getMessage should include("assumed.role.arn")
+  }
+
+  test("Tencent platform role is not forwarded to the AWS native provider") {
+    val conf = new Configuration(false)
+    conf.set(
+      "fs.s3a.aws.credentials.provider",
+      "com.zilliz.cloud.hadoop.TencentS3RoleCredentialsProvider"
+    )
+    conf.set("fs.s3a.assumed.role.arn", "qcs::cam::uin/123456:roleName/data")
+    val config = BackfillConfig(
+      s3Endpoint = "cos.ap-shanghai.myqcloud.com",
+      s3BucketName = "bucket",
+      s3AccessKey = "",
+      s3SecretKey = "",
+      s3UseIam = true
+    )
+    intercept[IllegalArgumentException](
+      config.withHadoopStorageAssumeRole(conf, "spark-job")
+    ).getMessage should include("s3CloudProvider=tencent")
+  }
+
+  test(
+    "explicit local binding needs no S3 fields and wins over legacy target credentials"
+  ) {
+    val local =
+      Map("fs.storage_type" -> "local", "fs.root_path" -> "/tmp/backfill")
+    val config = BackfillConfig(storageProperties = local)
+    config.validate() shouldBe Right(())
+    val resolved = config
+      .copy(
+        s3Endpoint = "unused",
+        s3AccessKey = "unused-ak",
+        s3SecretKey = "unused-sk"
+      )
+      .resolveStorage(new Configuration(false))
+    resolved("fs.storage_type") shouldBe "local"
+    resolved("fs.root_path") shouldBe "/tmp/backfill"
+    resolved should not contain key("fs.access_key_id")
+    config.getS3WriteOptionsForBasePath("segment")(
+      "fs.storage_type"
+    ) shouldBe "local"
+  }
+
+  test(
+    "explicit binding is validated and does not relax writer or source constraints"
+  ) {
+    BackfillConfig(storageProperties = Map("fs.storage_type" -> "remote"))
+      .validate()
+      .isLeft shouldBe true
+    val local = BackfillConfig(storageProperties =
+      Map("fs.storage_type" -> "local", "fs.root_path" -> "/tmp/backfill")
+    )
+    local.copy(batchSize = 0).validate() shouldBe Left(
+      "batchSize must be positive"
+    )
+    local
+      .copy(sourceS3AccessKey = Some("half-key"))
+      .validate()
+      .isLeft shouldBe true
+  }
+
+  test("AWS and OSS managed roles coexist without crossing target identities") {
+    val conf = new Configuration(false)
+    conf.set(
+      BackfillConfig.HadoopS3CredentialsProvider,
+      BackfillConfig.HadoopS3AssumedRoleProvider
+    )
+    conf.set(
+      BackfillConfig.HadoopS3AssumedRoleArn,
+      "arn:aws:iam::123456789012:role/aws-data"
+    )
+    conf.set(
+      BackfillConfig.HadoopOssCredentialsProvider,
+      BackfillConfig.HadoopOssAssumedRoleProvider
+    )
+    conf.set(
+      BackfillConfig.HadoopOssAssumedRoleArn,
+      "acs:ram::123456789012:role/oss-data"
+    )
+    conf.set(
+      "hadoop.security.credential.provider.path",
+      "jceks://file/tmp/credentials.jceks"
+    )
+    val base = BackfillConfig
+      .forTest("c")
+      .copy(s3AccessKey = "", s3SecretKey = "", s3UseIam = true)
+    val aws = base.withHadoopStorageAssumeRole(conf, "session")
+    val oss = base
+      .copy(s3CloudProvider = "aliyun")
+      .withHadoopStorageAssumeRole(conf, "session")
+    aws.s3RoleArn shouldBe Some("arn:aws:iam::123456789012:role/aws-data")
+    oss.s3RoleArn shouldBe Some("acs:ram::123456789012:role/oss-data")
+    aws.resolveStorage(conf)("fs.role_arn") shouldBe aws.s3RoleArn.get
+    oss.resolveStorage(conf)("fs.role_arn") shouldBe oss.s3RoleArn.get
+    conf.get(BackfillConfig.HadoopS3AssumedRoleArn) shouldBe aws.s3RoleArn.get
+    conf.get(BackfillConfig.HadoopOssAssumedRoleArn) shouldBe oss.s3RoleArn.get
+    BackfillConfig
+      .hadoopConfForCloud(conf, "aws")
+      .get("hadoop.security.credential.provider.path") shouldBe
+      "jceks://file/tmp/credentials.jceks"
+  }
+
+}

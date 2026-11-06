@@ -68,13 +68,13 @@ object Modules {
     )
   ) ++ noSparkImports
 
-  /** Knowhere's layer-1 module is plain Java, so its artifact carries no Scala
-    * suffix. Storage compiles upstream Scala sources for each shared Scala
-    * line.
+  /** The native runtime is plain Java, so its artifact carries no Scala suffix.
+    * Storage compiles upstream Scala sources for each shared Scala line.
     */
   val javaOnly: Seq[Setting[_]] = Seq(
     crossPaths := false,
     autoScalaLibrary := false,
+    Compile / doc / javacOptions += "-notimestamp",
     javacOptions ++= Seq("--release", Versions.sharedJavaRelease)
   )
 
@@ -121,6 +121,36 @@ object Modules {
     )
   }
 
+  /** Backfill's Iceberg input compiles from `scala-iceberg` where the line has
+    * an Iceberg runtime and from `scala-no-iceberg`, which refuses Iceberg
+    * input, where it has none. Formatting covers both roots.
+    */
+  def backfillSources(line: Versions.SparkLine): Seq[Setting[_]] = {
+    import org.scalafmt.sbt.ScalafmtPlugin.autoImport._
+    val roots = Seq("scala-iceberg", "scala-no-iceberg")
+    val selected =
+      if (line.backfill.exists(_.iceberg.isDefined)) "scala-iceberg"
+      else "scala-no-iceberg"
+    Seq(Compile, Test).flatMap { configuration =>
+      Seq(
+        configuration / unmanagedSourceDirectories +=
+          (configuration / sourceDirectory).value / selected,
+        // scalafmt reads its source list separately from its directory list.
+        configuration / scalafmt / unmanagedSources := {
+          val directory = (configuration / sourceDirectory).value
+          ((configuration / unmanagedSources).value ++
+            roots.flatMap(root =>
+              ((directory / root) ** "*.scala").get
+            )).distinct
+        },
+        configuration / scalafmt / unmanagedSourceDirectories ++= {
+          val directory = (configuration / sourceDirectory).value
+          roots.map(root => directory / root)
+        }
+      )
+    }
+  }
+
   /** Keep standalone core's Jackson family aligned. The Spark module relies on
     * its distribution's own Jackson set and excludes it from bundles.
     */
@@ -132,6 +162,61 @@ object Modules {
       "com.fasterxml.jackson.core" % "jackson-annotations" % Versions.jackson,
       "com.fasterxml.jackson.datatype" % "jackson-datatype-jsr310" % Versions.jackson
     )
+  )
+
+  /** Backfill calculations consume inputs and snapshots without service
+    * clients.
+    */
+  val backfillBoundary: Seq[Setting[_]] = Seq(
+    Compile / compile := {
+      val forbidden = Seq(
+        "io.milvus.v2",
+        "io.milvus.client",
+        "io.grpc",
+        "io.milvus.grpc.milvus"
+      )
+      val packages = IO
+        .readLines(
+          (ThisBuild / baseDirectory).value / "project" / "public-packages.txt"
+        )
+        .filter(line => line.trim.nonEmpty && !line.startsWith("#"))
+        .map(_.split("\\s+")(1))
+      val violations = (Compile / unmanagedSources).value.flatMap { source =>
+        val text = IO
+          .read(source)
+          .replaceAll("(?s)/\\*.*?\\*/", "")
+          .replaceAll("(?m)//.*$", "")
+        // Runtime configuration may name externally provided Hadoop classes.
+        // Ownership applies to statically referenced connector packages.
+        val code =
+          text.replaceAll("(?s)\"\"\".*?\"\"\"|\"(?:\\\\.|[^\"\\\\])*\"", "")
+        val ownedReferences = "\\bcom\\.zilliz\\.[A-Za-z0-9_.]+".r
+          .findAllIn(code)
+          .filterNot(reference =>
+            packages.exists(pkg =>
+              reference == pkg || reference.startsWith(pkg + ".")
+            )
+          )
+          .toSeq
+        (forbidden.filter(text.contains) ++ ownedReferences)
+          .map(reference =>
+            s"$source references an unowned or service package: $reference"
+          )
+      }
+      require(
+        violations.isEmpty,
+        "Backfill service boundary violation: " + violations.mkString("; ")
+      )
+      val dependencies = update.value.allModules
+      require(
+        !dependencies.exists(module =>
+          module.organization == "io.grpc" ||
+            (module.organization == "io.milvus" && module.name == "milvus-sdk-java")
+        ),
+        "Backfill must not depend on a Milvus service transport or SDK"
+      )
+      (Compile / compile).value
+    }
   )
 
   /** Test JVM settings for Arrow access and the selected native libraries. */

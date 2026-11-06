@@ -229,8 +229,7 @@ class MatrixTest(unittest.TestCase):
         for project in ("spark", "integration", "core"):
             self.assertEqual(validation.report_directory(project),
                              validation.ROOT / project / "target/test-reports")
-        for project, directory in (("native-runtime", "native/runtime"), ("native-storage", "native/storage"),
-                                   ("native-vector", "native/vector")):
+        for project, directory in (("native-runtime", "native/runtime"), ("native-storage", "native/storage")):
             self.assertEqual(validation.report_directory(project),
                              validation.ROOT / directory / "target/test-reports")
 
@@ -325,6 +324,39 @@ class MatrixTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.run_source_check(lambda: validation.spark_checks(matrix, "3.5", "2.12.20", None),
                                           **options)
+
+    def test_backfill_native_check_runs_each_backfill_line_with_its_matrix_scala(self):
+        matrix = copy.deepcopy(self.matrix)
+        matrix["spark"].append({"line": "4.2", "scala": "2.13.16", "scalaBinary": "2.13",
+                                "spark": "4.2.0", "project": "spark"})
+        root = Path(self.temporary.name)
+        bundle = root / "bundle.jar"
+        for line in ("4.0", "4.2"):
+            with self.subTest(line=line), \
+                    mock.patch.object(validation, "ROOT", root), \
+                    mock.patch.object(validation, "run_sbt", return_value="log") as run, \
+                    mock.patch.object(validation, "signal_environment", return_value={}), \
+                    mock.patch.object(validation, "check_reports", return_value={}) as reports, \
+                    mock.patch.object(validation, "check_execution", return_value={"backfill": {}}), \
+                    mock.patch.object(validation, "save_report") as saved:
+                validation.backfill_checks(matrix, line, bundle)
+                name = "backfill-native-" + line + "-2.13.16"
+                self.assertEqual(run.call_args.args, (name, ["backfill/NativeTest/test"]))
+                self.assertEqual((run.call_args.kwargs["line"], run.call_args.kwargs["scala"]),
+                                 (line, "2.13.16"))
+                self.assertEqual(run.call_args.kwargs["bundle"], bundle)
+                self.assertEqual(reports.call_args.args[1], validation.BACKFILL_SUITES)
+                self.assertEqual(saved.call_args.args[0], name)
+                self.assertEqual(saved.call_args.args[1]["selection"]["line"], line)
+        for line in ("3.5", "4.1", None):
+            with self.subTest(line=line), \
+                    self.assertRaisesRegex(ValueError, "^Backfill builds only on Spark 4.0 and 4.2$"):
+                validation.backfill_checks(matrix, line, bundle)
+        matrix["spark"] = [row for row in matrix["spark"] if row["line"] != "4.2"]
+        with self.assertRaisesRegex(ValueError, "Unsupported matrix selection"):
+            validation.backfill_checks(matrix, "4.2", bundle)
+        with self.assertRaisesRegex(ValueError, "requires --native-bundle"):
+            validation.backfill_checks(matrix, "4.0", None)
 
     def test_native_checks_leave_cleaning_to_the_source_jobs(self):
         matrix = self.source_matrix()

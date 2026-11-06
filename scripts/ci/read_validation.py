@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the exported source matrix and require actual read/search test reports."""
+"""Run the exported source matrix and require actual read and backfill test reports."""
 
 import argparse
 import hashlib
@@ -15,10 +15,6 @@ import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[2]
 SPARK_SUITES = (
-    "com.zilliz.spark.connector.nearestby.NearestByJoinTest",
-    "com.zilliz.spark.connector.nearestby.FrameSearchTest",
-    "com.zilliz.spark.connector.nearestby.VectorFunctionsTest",
-    "com.zilliz.spark.connector.search.SearchMergeTest",
     "com.zilliz.spark.connector.read.V3ReadContractTest",
     "com.zilliz.spark.connector.read.ArrowReadOwnershipTest",
 )
@@ -31,12 +27,17 @@ CORE_SUITES = (
 )
 RUNTIME_SUITE = "com.zilliz.milvus.jni.runtime.NativeLibrariesTest"
 INTEGRATION_SUITE = "com.zilliz.spark.connector.sources.MilvusDataSourceTest"
+BACKFILL_SUITES = (
+    "com.zilliz.spark.connector.backfill.BackfillNativeTest",
+    "com.zilliz.spark.connector.input.InputIdentityNativeTest",
+)
+# The Spark lines the backfill module builds on, Scala 2.13 only.
+BACKFILL_LINES = ("4.0", "4.2")
 
 MODULE_CLEAN = [project + "/clean" for project in
-                ("native-runtime", "native-storage", "native-vector", "core", "spark", "integration")]
+                ("native-runtime", "native-storage", "core", "spark", "backfill", "integration")]
 # The layer-1 project IDs keep their published names; their directories sit under native/.
-PROJECT_DIRECTORIES = {"native-runtime": "native/runtime", "native-storage": "native/storage",
-                       "native-vector": "native/vector"}
+PROJECT_DIRECTORIES = {"native-runtime": "native/runtime", "native-storage": "native/storage"}
 
 
 def read_matrix(path):
@@ -220,7 +221,7 @@ def selected(matrix, group, scala, line=None):
 def spark_checks(matrix, line, scala, bundle):
     row = selected(matrix, "spark", scala, line)
     project = row["project"]
-    suites = SPARK_SUITES + ((CONNECT_SUITE,) if line != "3.5" else ()) if bundle else (SPARK_SUITES[3],)
+    suites = SPARK_SUITES + ((CONNECT_SUITE,) if line != "3.5" else ()) if bundle else ("com.zilliz.spark.connector.read.ArrowReadOwnershipTest", "com.zilliz.spark.connector.table.ReadOnlyTableTest")
     name = ("spark-native-" if bundle else "spark-source-") + line + "-" + scala
     before = None if bundle else source_hashes()
     reset_reports((project,))
@@ -287,6 +288,25 @@ def integration_checks(bundle):
     save_report("object-storage", {"xmlSuites": xml_evidence(reports), "execution": counts})
 
 
+def backfill_checks(matrix, line, bundle):
+    if not bundle:
+        raise ValueError("Backfill native validation requires --native-bundle")
+    if line not in BACKFILL_LINES:
+        raise ValueError("Backfill builds only on Spark " + " and ".join(BACKFILL_LINES))
+    rows = [row for row in matrix["spark"] if row["line"] == line and row["scalaBinary"] == "2.13"]
+    if len(rows) != 1:
+        raise ValueError("Unsupported matrix selection")
+    row = rows[0]
+    name = "backfill-native-" + line + "-" + row["scala"]
+    directory = ROOT / "backfill/target/native-test-reports"
+    shutil.rmtree(directory, ignore_errors=True)
+    log = run_sbt(name, ["backfill/NativeTest/test"], bundle=bundle,
+                  environment=signal_environment(), line=line, scala=row["scala"])
+    reports = check_reports(directory, BACKFILL_SUITES)
+    counts = check_execution(log, [("backfill", reports)])["backfill"]
+    save_report(name, {"selection": row, "xmlSuites": xml_evidence(reports), "execution": counts})
+
+
 def source_hashes():
     names = subprocess.check_output(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
                                     cwd=ROOT).decode().split("\0")
@@ -332,7 +352,7 @@ def clean_contract(name, projects, records, before):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("matrix", "shared", "spark", "integration"))
+    parser.add_argument("action", choices=("matrix", "shared", "spark", "integration", "backfill"))
     parser.add_argument("--matrix", type=Path, required=True)
     parser.add_argument("--scala")
     parser.add_argument("--line")
@@ -350,6 +370,8 @@ def main():
         shared_checks(matrix, args.scala, args.native_bundle)
     elif args.action == "spark":
         spark_checks(matrix, args.line, args.scala, args.native_bundle)
+    elif args.action == "backfill":
+        backfill_checks(matrix, args.line, args.native_bundle)
     else:
         integration_checks(args.native_bundle)
 

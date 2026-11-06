@@ -29,7 +29,7 @@ class ConsumerTest(unittest.TestCase):
         with zipfile.ZipFile(path, "w") as archive:
             archive.writestr("META-INF/identity", artifact)
             if platform:
-                archive.writestr(f"native/milvus/1/{platform}/manifest.properties", "format.version=1")
+                archive.writestr(f"native/milvus/2/{platform}/manifest.properties", "format.version=2")
         return {"artifactId": artifact, "extension": "jar", "classifier": None,
                 "sha256": consumer.digest(path), "path": path.name}
 
@@ -120,15 +120,15 @@ class ConsumerTest(unittest.TestCase):
         _, expected = consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "platform")
         self.keep(expected)
         with zipfile.ZipFile(self.ivy / "jars/other.group_bad.jar", "w") as archive:
-            archive.writestr("native/milvus/1/linux-aarch64/manifest.properties", "format.version=1")
+            archive.writestr("native/milvus/2/linux-aarch64/manifest.properties", "format.version=2")
         with self.assertRaisesRegex(RuntimeError, "Resolved native platforms"):
             consumer.check_resolved(self.ivy, expected)
 
-    SHARED_THIN = {"spark-milvus-native-runtime", "spark-milvus-native-vector",
-                   "spark-milvus-native-storage_2.13", "spark-milvus-core_2.13"}
+    SHARED_THIN = {"spark-milvus-native-runtime", "spark-milvus-native-storage_2.13",
+                   "spark-milvus-core_2.13"}
 
     def thin_manifest(self):
-        names = ("native-runtime", "native-vector", "native-storage_2.13",
+        names = ("native-runtime", "native-storage_2.13",
                  "core_2.13", "4.0-thin_2.13", "4.2-thin_2.13")
         return {"plan": {"distribution": "thin", "native": []},
                 "artifacts": [self.jar("spark-milvus-" + name) for name in names]}
@@ -142,19 +142,63 @@ class ConsumerTest(unittest.TestCase):
                 # Both lines resolve the same shared modules below their own Spark module.
                 self.assertEqual(set(expected), self.SHARED_THIN | {entry})
                 self.keep(expected)
-                self.assertEqual(len(consumer.check_resolved(self.ivy, expected)), 5)
+                self.assertEqual(len(consumer.check_resolved(self.ivy, expected)), 4)
                 for extra in (f"spark-milvus-{line}-jvm_2.13", f"spark-milvus-{other}-thin_2.13"):
                     self.jar(extra)
                     with self.assertRaisesRegex(RuntimeError, "different connector artifacts"):
                         consumer.check_resolved(self.ivy, expected)
                     self.keep(expected)
 
+    def backfill_manifest(self):
+        manifest = self.thin_manifest()
+        for line in ("4.0", "4.2"):
+            manifest["artifacts"].append(self.jar(f"spark-milvus-backfill-{line}_2.13"))
+        return manifest
+
+    def test_backfill_resolves_its_module_above_its_line_thin_closure(self):
+        for line, other in (("4.0", "4.2"), ("4.2", "4.0")):
+            with self.subTest(line=line):
+                manifest = self.backfill_manifest()
+                entry, expected = consumer.expected_artifacts(manifest, line, "linux-x86_64", "backfill")
+                self.assertEqual(entry, f"spark-milvus-backfill-{line}_2.13")
+                # Only this line's thin and backfill modules sit above the shared closure.
+                self.assertEqual(set(expected), self.SHARED_THIN | {f"spark-milvus-{line}-thin_2.13", entry})
+                self.keep(expected)
+                self.assertEqual(len(consumer.check_resolved(self.ivy, expected)), 5)
+                self.jar(f"spark-milvus-backfill-{other}_2.13")
+                with self.assertRaisesRegex(RuntimeError, "different connector artifacts"):
+                    consumer.check_resolved(self.ivy, expected)
+        manifest = self.backfill_manifest()
+        with self.assertRaisesRegex(ValueError, "^Backfill consumer supports only Spark 4.0 and 4.2$"):
+            consumer.expected_artifacts(manifest, "4.1", "linux-x86_64", "backfill")
+        manifest["artifacts"] = [item for item in manifest["artifacts"]
+                                 if item["artifactId"] != "spark-milvus-backfill-4.2_2.13"]
+        with self.assertRaisesRegex(ValueError, "missing thin artifacts: spark-milvus-backfill-4.2_2.13$"):
+            consumer.expected_artifacts(manifest, "4.2", "linux-x86_64", "backfill")
+
+    def test_backfill_fixture_compiles_only_the_backfill_entry_on_each_line(self):
+        for line, spark in (("4.0", "4.0.1"), ("4.2", "4.2.0")):
+            with self.subTest(line=line):
+                work = self.root / ("fixture-" + line)
+                with mock.patch.object(consumer, "fixture_resources", return_value={}), \
+                     mock.patch.object(consumer, "run"), \
+                     mock.patch.object(consumer, "verify_fixture_jar") as verify:
+                    consumer.compile_fixture(work, "file:///candidate", "2.0.0",
+                                             {"scala": "2.13.16", "spark": spark},
+                                             f"spark-milvus-backfill-{line}_2.13", {})
+                sources = sorted(path.name for path in (work / "fixture/src/main/scala").iterdir())
+                self.assertEqual(sources, ["BackfillConsumerSmoke.scala"])
+                self.assertEqual(verify.call_args.args[2], (consumer.BACKFILL_MAIN.replace(".", "/"),))
+                build = (work / "fixture/build.sbt").read_text()
+                self.assertIn(f'"com.zilliz" % "spark-milvus-backfill-{line}_2.13" % "2.0.0"', build)
+                self.assertIn(f'"spark-sql" % "{spark}" % "provided"', build)
+
     def test_thin_rejects_native_resources_in_transitive_dependencies(self):
         manifest = self.thin_manifest()
         _, expected = consumer.expected_artifacts(manifest, "4.0", "linux-x86_64", "thin")
         self.keep(expected)
         with zipfile.ZipFile(self.ivy / "jars/other.group_bad.jar", "w") as archive:
-            archive.writestr("native/milvus/1/linux-x86_64/manifest.properties", "format.version=1")
+            archive.writestr("native/milvus/2/linux-x86_64/manifest.properties", "format.version=2")
         with self.assertRaisesRegex(RuntimeError, "Resolved native platforms"):
             consumer.check_resolved(self.ivy, expected)
 
