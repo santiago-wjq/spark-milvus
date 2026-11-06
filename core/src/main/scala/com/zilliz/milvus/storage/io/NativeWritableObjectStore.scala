@@ -1,15 +1,15 @@
 package com.zilliz.milvus.storage.io
 
-import com.zilliz.milvus.storage.credential.StorageProperties
-
 /** Adds business writes to an existing native session. This adapter owns the
   * supplied store; closing either view ends the shared session.
   *
-  * Object storage has no directories, so an `objectStorage` store creates none:
-  * neither the parents of a written file nor an explicit createDir. The native
-  * recursive create first checks the bucket (S3 HeadBucket), which an identity
-  * scoped to a key prefix is not allowed to do. Every operation still requires
-  * the store to be open.
+  * A written file gets its parent directories only on the local backend, which
+  * the store itself reports, so remote writes never ask for bucket or directory
+  * creation. An explicit createDir keeps the upstream filesystem semantics,
+  * except in `objectStorage` mode, which creates no directory at all: object
+  * storage has none, and the native recursive create first checks the bucket
+  * (S3 HeadBucket), which an identity scoped to a key prefix is not allowed to
+  * do. Every operation still requires the store to be open.
   */
 final class NativeWritableObjectStore(
     store: NativeObjectStore,
@@ -31,7 +31,7 @@ final class NativeWritableObjectStore(
     store.withFileSystem(key) { (filesystem, target) =>
       // Local files need parents; object storage has none to create.
       val parent = target.lastIndexOf('/')
-      if (!objectStorage && parent > 0)
+      if (store.local && !objectStorage && parent > 0)
         filesystem.createDir(target.substring(0, parent), true)
       filesystem.writeFile(target, data)
     }
@@ -51,14 +51,11 @@ final class NativeWritableObjectStore(
 
 object NativeWritableObjectStore {
 
-  /** A store over `properties` that creates directories only on local storage,
-    * as `fs.storage_type` selects it.
+  /** A store over `properties` in `objectStorage` mode unless the store is on
+    * the local backend, so it creates directories only there.
     */
-  def open(properties: Map[String, String]): NativeWritableObjectStore =
-    new NativeWritableObjectStore(
-      NativeObjectStore.Factory(properties).open(),
-      objectStorage = !properties
-        .get(StorageProperties.StorageType)
-        .exists(_.equalsIgnoreCase(StorageProperties.StorageTypeLocal))
-    )
+  def open(properties: Map[String, String]): NativeWritableObjectStore = {
+    val store = NativeObjectStore.Factory(properties).open()
+    new NativeWritableObjectStore(store, objectStorage = !store.local)
+  }
 }
