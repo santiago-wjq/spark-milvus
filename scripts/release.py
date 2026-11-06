@@ -42,6 +42,10 @@ for _line in (ROOT / "project/public-packages.txt").read_text().splitlines():
         PUBLIC_PACKAGES.setdefault(_module, set()).add(_package.replace(".", "/"))
 
 
+# The Spark lines the optional backfill module builds on, Scala 2.13 only.
+BACKFILL_LINES = ("4.0", "4.2")
+
+
 VERSION = re.compile(r"2\.\d+\.\d+(?:-(?:(?:alpha|beta|rc)\.\d+(?:\.\d+)*|central-test\.\d+))?")
 SHA = re.compile(r"[0-9a-f]{40}")
 
@@ -55,7 +59,8 @@ def thin_graph(line, binary, product):
     }
     require(product in {"reader", "backfill"}, "Unknown thin product")
     if product == "backfill":
-        require((line, binary) == ("4.0", "2.13"), "Backfill supports Spark 4.0 / Scala 2.13")
+        require(line in BACKFILL_LINES and binary == "2.13",
+                "Backfill supports Spark " + " and ".join(BACKFILL_LINES) + " / Scala 2.13")
         graph[f"spark-milvus-backfill-{line}_{binary}"] = (
             "backfill", (f"spark-milvus-{line}-thin_{binary}", f"spark-milvus-core_{binary}"))
     return graph
@@ -208,7 +213,11 @@ def create_plan(version, output, matrix, thin_only=False):
     sources = exported.get("spark", [])
     require(len(sources) == 5, "Build matrix must retain all five Spark/Scala source combinations")
     plan["thin"] = [dict(row, product="reader") for row in sources]
-    plan["thin"].extend(dict(row, product="backfill") for row in sources if row["line"] == "4.0")
+    backfill = [row for row in sources if row["line"] in BACKFILL_LINES
+                and row["scala"].startswith("2.13.")]
+    require(sorted(row["line"] for row in backfill) == sorted(BACKFILL_LINES),
+            "Build matrix must retain one Scala 2.13 combination for each backfill line")
+    plan["thin"].extend(dict(row, product="backfill") for row in backfill)
     plan["version"] = version
     if thin_only:
         plan["distribution"] = "thin"

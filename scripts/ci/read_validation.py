@@ -27,6 +27,12 @@ CORE_SUITES = (
 )
 RUNTIME_SUITE = "com.zilliz.milvus.jni.runtime.NativeLibrariesTest"
 INTEGRATION_SUITE = "com.zilliz.spark.connector.sources.MilvusDataSourceTest"
+BACKFILL_SUITES = (
+    "com.zilliz.spark.connector.backfill.BackfillNativeTest",
+    "com.zilliz.spark.connector.input.InputIdentityNativeTest",
+)
+# The Spark lines the backfill module builds on, Scala 2.13 only.
+BACKFILL_LINES = ("4.0", "4.2")
 
 MODULE_CLEAN = [project + "/clean" for project in
                 ("native-runtime", "native-storage", "core", "spark", "backfill", "integration")]
@@ -282,18 +288,23 @@ def integration_checks(bundle):
     save_report("object-storage", {"xmlSuites": xml_evidence(reports), "execution": counts})
 
 
-def backfill_checks(bundle):
+def backfill_checks(matrix, line, bundle):
     if not bundle:
         raise ValueError("Backfill native validation requires --native-bundle")
-    suites = ("com.zilliz.spark.connector.backfill.BackfillNativeTest",
-              "com.zilliz.spark.connector.input.InputIdentityNativeTest")
+    if line not in BACKFILL_LINES:
+        raise ValueError("Backfill builds only on Spark " + " and ".join(BACKFILL_LINES))
+    rows = [row for row in matrix["spark"] if row["line"] == line and row["scalaBinary"] == "2.13"]
+    if len(rows) != 1:
+        raise ValueError("Unsupported matrix selection")
+    row = rows[0]
+    name = "backfill-native-" + line + "-" + row["scala"]
     directory = ROOT / "backfill/target/native-test-reports"
     shutil.rmtree(directory, ignore_errors=True)
-    log = run_sbt("backfill-native", ["backfill/NativeTest/test"], bundle=bundle,
-                  environment=signal_environment())
-    reports = check_reports(directory, suites)
+    log = run_sbt(name, ["backfill/NativeTest/test"], bundle=bundle,
+                  environment=signal_environment(), line=line, scala=row["scala"])
+    reports = check_reports(directory, BACKFILL_SUITES)
     counts = check_execution(log, [("backfill", reports)])["backfill"]
-    save_report("backfill-native", {"xmlSuites": xml_evidence(reports), "execution": counts})
+    save_report(name, {"selection": row, "xmlSuites": xml_evidence(reports), "execution": counts})
 
 
 def source_hashes():
@@ -360,7 +371,7 @@ def main():
     elif args.action == "spark":
         spark_checks(matrix, args.line, args.scala, args.native_bundle)
     elif args.action == "backfill":
-        backfill_checks(args.native_bundle)
+        backfill_checks(matrix, args.line, args.native_bundle)
     else:
         integration_checks(args.native_bundle)
 

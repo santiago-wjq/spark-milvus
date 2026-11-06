@@ -37,7 +37,8 @@ bindings' component requirements; it must not overlay bundles for one platform.
 | `4.1` | 4.1.1 | 2.13.16 | 17 |
 | `4.2` | 4.2.0 | 2.13.16 | 17 |
 
-Backfill initially supports Spark 4.0 / Scala 2.13 only. Build with Java 21.
+Backfill supports Spark 4.0 and 4.2 with Scala 2.13. Iceberg input is
+unavailable on 4.2, for which Iceberg publishes no runtime. Build with Java 21.
 Spark 3.5 Arrow tests use Java 17 through `SPARK35_TEST_JAVA_HOME`. Reader thin
 candidates cover the source matrix; fat distribution consumers cover 4.0/4.2.
 
@@ -82,9 +83,10 @@ every action. See the [reference](docs/reference.md) for canonical options.
 ## Offline backfill
 
 Backfill receives a fixed V3 snapshot and a DataFrame, Parquet path or pinned
-Iceberg snapshot. It validates fields and join keys, preserves physical row
-positions, applies the selected merge policy, writes segment column files and
-exports result JSON. It does not update a running Milvus collection by itself.
+Iceberg snapshot (Spark 4.0 only). It validates fields and join keys, preserves
+physical row positions, applies the selected merge policy, writes segment column
+files and exports result JSON. It does not update a running Milvus collection by
+itself.
 
 The `legacy` output protocol produces manifests; `manifest-delta-v1` produces
 column-file operations for a compatible receiver to commit. This protocol choice

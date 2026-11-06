@@ -32,10 +32,12 @@ Five production modules, with dependencies only pointing downward.
 Layer-1 modules live in `native/runtime` and `native/storage`; `native/build`
 produces the Storage-only platform bundle. The root aggregates production modules
 and publishes no artifact. `integration` is outside the aggregate. Backfill
-requires Spark 4.0 / Scala 2.13; reader sources support Spark 3.5 (Scala 2.12 or
-2.13), 4.0, 4.1 and 4.2. `-DsparkVersion` and `-DscalaVersion` select a profile
-at sbt startup. Restart sbt and clean module outputs when switching profiles.
-Formatting and package checks inspect every retained shim root.
+builds on Spark 4.0 and 4.2 with Scala 2.13; Iceberg publishes no Spark 4.2
+runtime, so the 4.2 build refuses Iceberg input. Reader sources support Spark
+3.5 (Scala 2.12 or 2.13), 4.0, 4.1 and 4.2. `-DsparkVersion` and
+`-DscalaVersion` select a profile at sbt startup. Restart sbt and clean module
+outputs when switching profiles. Formatting and package checks inspect every
+retained shim and Iceberg variant root.
 
 Initialize the `milvus-proto` and `milvus-storage` submodules before building.
 Only common/schema protobufs are generated; no service protocol is generated.

@@ -2,8 +2,8 @@
 
 The optional `backfill` module matches existing snapshot rows with input data,
 computes replacement field values, and writes segment files and a result
-manifest. It supports Spark 4.0 / Scala 2.13. The reader remains available on
-all supported Spark profiles without a dependency on backfill.
+manifest. It supports Spark 4.0 and 4.2 with Scala 2.13. The reader remains
+available on all supported Spark profiles without a dependency on backfill.
 
 The caller supplies an existing, stable Storage V3 snapshot, its storage
 configuration and input rows. Replacement files are written under each source
@@ -36,7 +36,9 @@ The caller owns the input DataFrame and its cache.
 The path API accepts Parquet or Iceberg input. With the default primary-key
 join and no column mapping, path input retains the literal `pk` column
 convention. `columnMapping` maps input columns to collection field names.
-Iceberg input can select an explicit snapshot ID. Input storage and target
+Iceberg input can select an explicit snapshot ID. Iceberg input is available on
+Spark 4.0 only: Iceberg publishes no Spark 4.2 runtime, so the 4.2 build refuses
+Iceberg input before reading anything. Input storage and target
 storage may use different credentials; the
 [storage reference](reference.md#22-storage-location-and-credentials) describes the
 connector's native storage configuration.

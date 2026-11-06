@@ -14,12 +14,14 @@ module `target` directories. Native compilation uses the host architecture.
 
 Production projects are `native-runtime`, `native-storage`, `core`, `spark` and
 `backfill`. The first two live under `native/`. `integration` stays outside the
-root aggregate. Backfill supports Spark 4.0 / Scala 2.13; reader profiles support
-3.5 (Scala 2.12/2.13), 4.0, 4.1 and 4.2.
+root aggregate. Backfill supports Spark 4.0 and 4.2 with Scala 2.13; the 4.2
+profile builds the Iceberg reader as a stub that refuses Iceberg input, because
+Iceberg publishes no Spark 4.2 runtime. Reader profiles support 3.5 (Scala
+2.12/2.13), 4.0, 4.1 and 4.2.
 
 ```bash
 sbt core/test spark/compile backfill/compile
-sbt -DsparkVersion=4.2 -DscalaVersion=2.13.16 'clean; integration/clean; spark/compile; spark/test'
+sbt -DsparkVersion=4.2 -DscalaVersion=2.13.16 'clean; integration/clean; spark/compile; spark/test; backfill/test'
 sbt -DsparkVersion=3.5 -DscalaVersion=2.12.20 'clean; integration/clean; spark/compile; spark/test'
 ```
 
@@ -97,7 +99,8 @@ source identity and caches. Never mutate shared Hadoop settings to switch users.
 ### Public read CI
 
 The source matrix covers every reader Spark/Scala combination. The default
-Spark 4.0 job also runs all backfill unit tests. Full validation requires native
+Spark 4.0 job also runs all backfill unit tests; the Spark 4.2 source job runs
+them on 4.2. Full validation requires native
 Storage reads, Arrow ownership, Connect, independent consumer JVMs, object-store
 identity isolation and backfill write/readback. Linux x86/ARM and macOS Storage
 coverage is retained. Search-specific gates belong outside the public build.

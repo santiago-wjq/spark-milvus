@@ -75,8 +75,8 @@ object ThinArtifacts {
     val product =
       if (modules.exists(_.projectId == "backfill")) "backfill" else "reader"
     require(
-      product != "backfill" || (line.id == "4.0" && scalaBinary == "2.13"),
-      "Backfill releases support Spark 4.0 / Scala 2.13"
+      product != "backfill" || (line.backfill.isDefined && scalaBinary == "2.13"),
+      s"Backfill releases support Spark ${Versions.backfillLines.map(_.id).mkString(" and ")} / Scala 2.13"
     )
     val expected = Set("native-runtime", "native-storage", "core", "spark") ++
       (if (product == "backfill") Set("backfill") else Set.empty[String])

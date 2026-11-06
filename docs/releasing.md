@@ -10,12 +10,14 @@ only the upstream repository can enter publication jobs.
 | Product | Modules | Profiles |
 |---|---|---|
 | Reader thin | native-runtime, native-storage, core, spark | Spark 3.5 with Scala 2.12/2.13; 4.0, 4.1, 4.2 with Scala 2.13 |
-| Backfill thin | Reader closure plus backfill | Spark 4.0 / Scala 2.13 |
+| Backfill thin | Reader closure plus backfill | Spark 4.0 and 4.2 / Scala 2.13 |
 | Reader bundled JVM | JVM dependency closure, without platform libraries | Spark 4.0 and 4.2 / Scala 2.13 |
 | Native platform | Storage JNI and its dependency closure | Linux x86_64/aarch64; macOS aarch64 |
 
-All thin modules use one immutable candidate version. The backfill artifact is
-`com.zilliz:spark-milvus-backfill-4.0_2.13:<version>`. Shared artifacts exported
+All thin modules use one immutable candidate version. The backfill artifacts are
+`com.zilliz:spark-milvus-backfill-<line>_2.13:<version>` for lines 4.0 and 4.2;
+the 4.2 artifact refuses Iceberg input, as Iceberg publishes no Spark 4.2
+runtime. Shared artifacts exported
 by several products or Spark profiles must have identical POM metadata and
 bytes for a given Maven coordinate. Product metadata explicitly distinguishes
 reader and backfill closures. The root project publishes nothing.
@@ -92,9 +94,9 @@ runtime evidence.
 Candidate consumers resolve the selected artifacts in isolated projects and
 run with independent executors. Reader consumers assert fixed V3 rows,
 projection, deletes, empty results and repeated actions. The backfill consumer
-uses its separate product closure. Linux image jobs run the exact reader
-assembly. Search correctness, native search tests and CPU portability belong
-to the repository that owns search.
+runs on every consumer line with that line's separate product closure. Linux
+image jobs run the exact reader assembly. Search correctness, native search
+tests and CPU portability belong to the repository that owns search.
 
 Required GitHub check names must match the workflow after the migration. A
 workflow file cannot update repository rules, environment secrets or approval
