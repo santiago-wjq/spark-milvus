@@ -99,15 +99,6 @@ object Dependencies {
         "hadoop-client-runtime"
       ).map(m => "org.apache.hadoop" % m % l.hadoop)
 
-  /** The Iceberg Spark runtime that backfill's Iceberg input compiles against
-    * on a line; deployments supply it. Empty where Iceberg publishes no runtime
-    * for the line.
-    */
-  def iceberg(l: Versions.SparkLine): Seq[ModuleID] =
-    l.backfill.flatMap(_.iceberg).toSeq.map { version =>
-      "org.apache.iceberg" %% s"iceberg-spark-runtime-${l.id}" % version % "provided,test"
-    }
-
   /** Dependencies needed by snapshot reads, vector-valued columns and storage
     * credentials.
     */

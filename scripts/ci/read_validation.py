@@ -27,10 +27,7 @@ CORE_SUITES = (
 )
 RUNTIME_SUITE = "com.zilliz.milvus.jni.runtime.NativeLibrariesTest"
 INTEGRATION_SUITE = "com.zilliz.spark.connector.sources.MilvusDataSourceTest"
-BACKFILL_SUITES = (
-    "com.zilliz.spark.connector.backfill.BackfillNativeTest",
-    "com.zilliz.spark.connector.input.InputIdentityNativeTest",
-)
+BACKFILL_SUITES = ("com.zilliz.spark.connector.backfill.BackfillNativeTest",)
 # The Spark lines the backfill module builds on, Scala 2.13 only.
 BACKFILL_LINES = ("4.0", "4.2")
 

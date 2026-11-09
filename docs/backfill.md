@@ -1,23 +1,28 @@
 # Offline backfill
 
-The optional `backfill` module matches existing snapshot rows with input data,
-computes replacement field values, and writes segment files and a result
-manifest. It supports Spark 4.0 and 4.2 with Scala 2.13. The reader remains
-available on all supported Spark profiles without a dependency on backfill.
+The optional `backfill` module matches existing snapshot rows with the rows of
+a caller's DataFrame, computes replacement field values, and writes segment
+files and a result manifest. It supports Spark 4.0 and 4.2 with Scala 2.13. The
+reader remains available on all supported Spark profiles without a dependency
+on backfill.
 
 The caller supplies an existing, stable Storage V3 snapshot, its storage
-configuration and input rows. Replacement files are written under each source
-segment's existing base path. There is no independent column-file output-path
-override. The caller is responsible
-for retaining the snapshot and its files for the whole job. The module does
-not create or protect snapshots, connect to Milvus, submit updates, wait for
-online visibility, or clean up a managed job.
+configuration and a DataFrame of input rows. The caller reads that input with
+any Spark source and identity; the module opens no input path and depends on no
+input format. Replacement files are written under each source segment's
+existing base path. There is no independent column-file output-path override.
+The caller is responsible for retaining the snapshot and its files for the
+whole job. The module does not create or protect snapshots, connect to Milvus,
+submit updates, wait for online visibility, or clean up a managed job, and it
+has no command-line entry point.
 
 ## DataFrame API
 
 ```scala
 import com.zilliz.spark.connector.backfill.{BackfillConfig, MilvusBackfill}
 
+// Any Spark source, read with the caller's own identity.
+val input = spark.read.parquet("s3a://example-input/backfill/")
 val config = BackfillConfig(
   storageProperties = storageProperties, // native fs.* properties for the snapshot and output
   mode = BackfillConfig.ModeCoalesce
@@ -27,19 +32,17 @@ val result = MilvusBackfill.run(input, "snapshots/existing.json", config)
 println(result.toJson)
 ```
 
-`input` is a Spark DataFrame whose columns use the collection's field names.
-The default join key is the collection primary key. A configured physical
-join field must be a non-nullable scalar with stable equality semantics.
-Duplicate or invalid input identities fail validation before output is written.
-The caller owns the input DataFrame and its cache.
+`input` is a non-streaming Spark DataFrame whose columns use the collection's
+field names. `columnMapping` maps other input column names to field names. With
+the default primary-key join and no mapping, `pkColumnAlias = true` accepts a
+literal `pk` column for the primary key instead of the key field's own name.
+The default join key is the collection primary key. A configured physical join
+field must be a non-nullable scalar with stable equality semantics. Duplicate or
+invalid input identities fail validation before output is written.
 
-The path API accepts Parquet or Iceberg input. With the default primary-key
-join and no column mapping, path input retains the literal `pk` column
-convention. `columnMapping` maps input columns to collection field names.
-Iceberg input can select an explicit snapshot ID. Iceberg input is available on
-Spark 4.0 only: Iceberg publishes no Spark 4.2 runtime, so the 4.2 build refuses
-Iceberg input before reading anything. Input storage and target
-storage may use different credentials; the
+The caller owns the input DataFrame, its cache and the credentials it is read
+with. The configuration only carries the target storage, which the snapshot,
+the written files and the result receipt use; the
 [storage reference](reference.md#22-storage-location-and-credentials) describes the
 connector's native storage configuration.
 
@@ -59,18 +62,25 @@ snapshot's Avro records. L0 delete-only entries produce no replacement files.
 
 A successful `BackfillResult` contains collection/schema identity, per-segment
 row counts, field mappings, output file locations and merge statistics.
-`BackfillStorage.writeResultJson` persists this receipt. The output is stored
-data plus metadata, not a Milvus update acknowledgement.
+`BackfillStorage.writeResultJson` persists this receipt with the target storage
+identity. The output is stored data plus metadata, not a Milvus update
+acknowledgement. `inputSnapshotId` lets the caller record which version of its
+input it read, such as an Iceberg snapshot; the module never sets it.
 
-Path calls can provide `onResult: BackfillResult => BackfillResult` to persist
-the complete result on the driver before owned input resources close. The
-prepared API requires this callback and `onRecovery: BackfillRecovery => Unit`.
-When collected segment outcomes include failures, `onRecovery` receives the
-known completed segment records before cleanup; the operation still returns
-`Left`. Its separate `backfill-recovery-v1` JSON envelope has `complete=false`
-and a failed job result. It is recovery evidence and must never be submitted
-as a complete backfill. If a worker or driver is lost before returning its
-commit record, storage may require reconciliation beyond these known records.
+`run` accepts `onResult: BackfillResult => BackfillResult` to persist the
+complete result on the driver before the backfill releases its own resources,
+and `release: () => Unit` for resources the caller's input holds, such as a
+bound input identity; it runs with that cleanup, after publication.
+`runPrepared` takes an already bound configuration, checks the expected
+collection and snapshot, runs `beforeWrite` immediately before writing, and
+requires this callback and `onRecovery: BackfillRecovery => Unit`. When
+collected segment outcomes include failures, `onRecovery` receives the known
+completed segment records before cleanup; the operation still returns `Left`.
+Its separate `backfill-recovery-v1` JSON envelope has `complete=false` and a
+failed job result; `BackfillStorage.writeResolvedRecoveryJson` writes it. It is
+recovery evidence and must never be submitted as a complete backfill. If a
+worker or driver is lost before returning its commit record, storage may
+require reconciliation beyond these known records.
 
 `BackfillError.stage` distinguishes computation, segment writing, complete
 result publication, recovery publication and cleanup (`compute`, `write`,
@@ -86,21 +96,11 @@ returns manifest operations and file descriptors; the receiver commits those
 operations. Capability selection must match the receiving service. A successful
 offline job alone does not make the new values visible to Milvus queries.
 
-## Command-line entry point
+## Packaging
 
-`com.zilliz.spark.connector.backfill.BackfillApp` accepts existing snapshot and
-input paths, storage settings, merge mode and output options; its
-[entry point](../backfill/src/main/scala/com/zilliz/spark/connector/backfill/BackfillApp.scala)
-lists the accepted arguments. Supply the backfill artifact, its reader
-dependencies, and one matching Storage native bundle to Spark on both driver
-and executors. Never put credentials in a committed options file.
-
-Every CLI run requires `--output-result <path>`. A complete result is written
-there before input cleanup, using the target storage identity. A partial write
-instead writes `<path>.recovery.json`, preserves its completed segment records,
-and exits unsuccessfully; it never writes a complete result. Use a fresh result
-path for each run. The receipt location is independent of the segment file
-locations and may be a local path or a path in the configured object store.
+Supply the backfill artifact, its reader dependencies, and one matching Storage
+native bundle to Spark on both driver and executors. Never put credentials in a
+committed options file.
 
 See [releasing](releasing.md) for the artifact graph and
 [contributing](contributing.md) for unit and real-storage tests.

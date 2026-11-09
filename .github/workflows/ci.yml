@@ -145,9 +145,8 @@ jobs:
           SPARK35_TEST_JAVA_HOME: ${{ steps.test-java.outputs.path }}
         run: python3 scripts/ci/read_validation.py spark --matrix build-matrix.json --line '${{ matrix.line }}' --scala '${{ matrix.scala }}'
       # Backfill builds on Spark 4.0 and 4.2. The default line's backfill unit
-      # tests run in build-and-test; this lane runs 4.2's, where Iceberg input
-      # is refused because Iceberg publishes no Spark 4.2 runtime. It follows the
-      # clean contract above so that its reports remain for upload.
+      # tests run in build-and-test; this lane runs 4.2's. It follows the clean
+      # contract above so that its reports remain for upload.
       - name: Backfill unit tests and native test compilation
         if: matrix.line == '4.2'
         env:
@@ -361,12 +360,12 @@ jobs:
           MILVUS_READ_IT_OPTIONS: ${{ runner.temp }}/read-storage/a.json
           MILVUS_READ_IT_OPTIONS_B: ${{ runner.temp }}/read-storage/b.json
         run: python3 scripts/ci/read_validation.py integration --matrix build-matrix.json --native-bundle native-input/milvus-native-linux-x86_64.jar
-      # Every backfill line writes and reads back real V3 files; Iceberg input
-      # is covered where the line has an Iceberg runtime.
+      # Every backfill line writes and reads back real V3 files, on local
+      # storage and on object storage under a prefix-scoped target identity.
       - name: Prepare independent backfill input and target identities
         if: matrix.line == '4.0' || matrix.line == '4.2'
         run: python3 scripts/ci/input_storage.py start --env-file "$RUNNER_TEMP/backfill-input.env"
-      - name: Require backfill writes, readback and identity isolation
+      - name: Require backfill writes, readback and target identity scope
         if: matrix.line == '4.0' || matrix.line == '4.2'
         run: python3 scripts/ci/read_validation.py backfill --matrix build-matrix.json --line '${{ matrix.line }}' --native-bundle native-input/milvus-native-linux-x86_64.jar
       - name: Remove the backfill identity fixture

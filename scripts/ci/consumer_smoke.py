@@ -32,7 +32,7 @@ BACKFILL_MAIN = "com.zilliz.spark.connector.backfill.BackfillConsumerSmoke"
 BACKFILL_FIXTURES = ("backfill/src/test/scala/com/zilliz/spark/connector/backfill/BackfillConsumerSmoke.scala",)
 BACKFILL_CHECKS = ("independent-executor", "backfill-v3-consumer", "backfill-result-json", "backfill-offline-boundary")
 # The Spark lines the backfill module is built for. Its consumer backfills from an
-# in-memory DataFrame, so no check needs Iceberg and every line runs them all.
+# in-memory DataFrame, and every line runs all of these checks.
 BACKFILL_LINES = ("4.0", "4.2")
 FIXTURE_ROOT = ROOT / "core/src/test/resources/read-fixtures"
 FIXTURE_GROUPS = ("collections/nearest",)

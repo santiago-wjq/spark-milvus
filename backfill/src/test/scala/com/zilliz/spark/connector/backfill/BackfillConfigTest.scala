@@ -8,6 +8,18 @@ import com.zilliz.milvus.storage.credential.StorageProperties
 
 /** Unit tests for BackfillConfig validation and options generation
   */
+/** Hadoop keys the platform sets for a selected data role. */
+private object HadoopKeys {
+  val S3CredentialsProvider = "fs.s3a.aws.credentials.provider"
+  val S3AssumedRoleArn = "fs.s3a.assumed.role.arn"
+  val S3AssumedRoleSessionName = "fs.s3a.assumed.role.session.name"
+  val S3AssumedRoleExternalId = "fs.s3a.assumed.role.external.id"
+  val OssAssumedRoleArn = "fs.oss.assumed.role.arn"
+  val OssCredentialsProvider = "fs.oss.credentials.provider"
+  val OssAssumedRoleSessionName = "fs.oss.assumed.role.session.name"
+  val OssAssumedRoleExternalId = "fs.oss.assumed.role.external.id"
+}
+
 class BackfillConfigTest extends AnyFunSuite with Matchers {
 
   test("delta output requires an explicit recognized receiver capability") {
@@ -63,124 +75,6 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     )
 
     config.validate() shouldBe Right(())
-    config.inputFormat shouldBe BackfillConfig.DefaultInputFormat
-  }
-
-  test("validate accepts implemented inputFormat (parquet)") {
-    BackfillConfig.ImplementedInputFormats.foreach { format =>
-      val config = BackfillConfig(
-        s3Endpoint = "localhost:9000",
-        s3BucketName = "test-bucket",
-        s3AccessKey = "minioadmin",
-        s3SecretKey = "minioadmin",
-        inputFormat = format
-      )
-      config.validate() shouldBe Right(())
-    }
-  }
-
-  test("validate rejects recognized-but-unimplemented inputFormats") {
-    val unimplemented =
-      BackfillConfig.AllowedInputFormats -- BackfillConfig.ImplementedInputFormats
-    unimplemented should not be empty
-    unimplemented.foreach { format =>
-      val config = BackfillConfig(
-        s3Endpoint = "localhost:9000",
-        s3BucketName = "test-bucket",
-        s3AccessKey = "minioadmin",
-        s3SecretKey = "minioadmin",
-        inputFormat = format
-      )
-      config.validate() match {
-        case Right(_) =>
-          fail(
-            s"expected validation error for unimplemented inputFormat '$format'"
-          )
-        case Left(message) =>
-          message should include("recognized but not yet implemented")
-      }
-    }
-  }
-
-  test("validate rejects unknown inputFormat") {
-    val config = BackfillConfig(
-      s3Endpoint = "localhost:9000",
-      s3BucketName = "test-bucket",
-      s3AccessKey = "minioadmin",
-      s3SecretKey = "minioadmin",
-      inputFormat = "avro"
-    )
-    config.validate() match {
-      case Right(_) =>
-        fail("expected validation error for unknown inputFormat")
-      case Left(message) =>
-        message should include("inputFormat must be one of")
-        message should include("(got 'avro')")
-    }
-  }
-
-  test("validate accepts iceberg inputFormat with a valid snapshot id") {
-    val config = BackfillConfig(
-      s3Endpoint = "localhost:9000",
-      s3BucketName = "test-bucket",
-      s3AccessKey = "minioadmin",
-      s3SecretKey = "minioadmin",
-      inputFormat = "iceberg",
-      icebergSnapshotId = Some("4325893492")
-    )
-    config.validate() shouldBe Right(())
-  }
-
-  test("validate accepts a whitespace-padded icebergSnapshotId") {
-    // validate() trims before parsing and readIceberg trims before passing the
-    // value to the snapshot-id option, so a padded id must not be rejected.
-    val config = BackfillConfig(
-      s3Endpoint = "localhost:9000",
-      s3BucketName = "test-bucket",
-      s3AccessKey = "minioadmin",
-      s3SecretKey = "minioadmin",
-      inputFormat = "iceberg",
-      icebergSnapshotId = Some("  4325893492  ")
-    )
-    config.validate() shouldBe Right(())
-  }
-
-  test("validate rejects a non-integer icebergSnapshotId") {
-    val config = BackfillConfig(
-      s3Endpoint = "localhost:9000",
-      s3BucketName = "test-bucket",
-      s3AccessKey = "minioadmin",
-      s3SecretKey = "minioadmin",
-      inputFormat = "iceberg",
-      icebergSnapshotId = Some("not-a-snapshot")
-    )
-    config.validate() match {
-      case Right(_) =>
-        fail("expected validation error for non-integer icebergSnapshotId")
-      case Left(message) =>
-        message should include(
-          "icebergSnapshotId must be an integer snapshot id"
-        )
-    }
-  }
-
-  test("validate rejects icebergSnapshotId for non-iceberg inputFormat") {
-    val config = BackfillConfig(
-      s3Endpoint = "localhost:9000",
-      s3BucketName = "test-bucket",
-      s3AccessKey = "minioadmin",
-      s3SecretKey = "minioadmin",
-      inputFormat = "parquet",
-      icebergSnapshotId = Some("4325893492")
-    )
-    config.validate() match {
-      case Right(_) =>
-        fail("expected validation error for icebergSnapshotId without iceberg")
-      case Left(message) =>
-        message should include(
-          "icebergSnapshotId requires inputFormat='iceberg'"
-        )
-    }
   }
 
   test(
@@ -287,33 +181,6 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     config.validate().isLeft shouldBe true
   }
 
-  test(
-    "Source bucket half-set credentials without sourceS3UseIam are rejected"
-  ) {
-    val config = BackfillConfig(
-      s3Endpoint = "localhost:9000",
-      s3BucketName = "test-bucket",
-      s3AccessKey = "main-ak",
-      s3SecretKey = "main-sk",
-      sourceS3AccessKey = Some("src-ak"),
-      sourceS3SecretKey = Some("")
-    )
-    config.validate().isLeft shouldBe true
-  }
-
-  test("Source bucket override with sourceS3UseIam=true is accepted") {
-    val config = BackfillConfig(
-      s3Endpoint = "localhost:9000",
-      s3BucketName = "test-bucket",
-      s3AccessKey = "main-ak",
-      s3SecretKey = "main-sk",
-      sourceS3AccessKey = Some(""),
-      sourceS3SecretKey = Some(""),
-      sourceS3UseIam = Some(true)
-    )
-    config.validate() shouldBe Right(())
-  }
-
   test("AssumeRole settings require IAM mode and a role ARN") {
     BackfillConfig(
       s3Endpoint = "s3.amazonaws.com",
@@ -368,15 +235,15 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
   test("withHadoopStorageAssumeRole derives the AWS native main-storage role") {
     val hadoopConf = new Configuration(false)
     hadoopConf.set(
-      BackfillConfig.HadoopS3CredentialsProvider,
+      HadoopKeys.S3CredentialsProvider,
       BackfillConfig.HadoopS3AssumedRoleProvider
     )
     hadoopConf.set(
-      BackfillConfig.HadoopS3AssumedRoleArn,
+      HadoopKeys.S3AssumedRoleArn,
       "arn:aws:iam::123456789012:role/data-role"
     )
     hadoopConf.set(
-      BackfillConfig.HadoopS3AssumedRoleExternalId,
+      HadoopKeys.S3AssumedRoleExternalId,
       "external-id"
     )
     val config = BackfillConfig(
@@ -406,15 +273,15 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
   ) {
     val hadoopConf = new Configuration(false)
     hadoopConf.set(
-      BackfillConfig.HadoopOssAssumedRoleArn,
+      HadoopKeys.OssAssumedRoleArn,
       "acs:ram::123456789012:role/spark-data-role"
     )
     hadoopConf.set(
-      BackfillConfig.HadoopOssAssumedRoleSessionName,
+      HadoopKeys.OssAssumedRoleSessionName,
       "spark-job"
     )
     hadoopConf.set(
-      BackfillConfig.HadoopOssAssumedRoleExternalId,
+      HadoopKeys.OssAssumedRoleExternalId,
       "external-id"
     )
     val config = BackfillConfig(
@@ -480,7 +347,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     val hadoopConf = new Configuration(false)
     val prefix = "fs.s3a.bucket.bucket"
     hadoopConf.set(
-      BackfillConfig.HadoopS3CredentialsProvider,
+      HadoopKeys.S3CredentialsProvider,
       BackfillConfig.HadoopS3AssumedRoleProvider
     )
     hadoopConf.set(
@@ -488,7 +355,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       "arn:aws:iam::123456789012:role/bucket-role"
     )
     hadoopConf.set(
-      BackfillConfig.HadoopS3AssumedRoleExternalId,
+      HadoopKeys.S3AssumedRoleExternalId,
       "global-external-id"
     )
     val config = BackfillConfig(
@@ -521,7 +388,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
       BackfillConfig.HadoopS3AssumedRoleProvider
     )
     hadoopConf.set(
-      BackfillConfig.HadoopS3AssumedRoleArn,
+      HadoopKeys.S3AssumedRoleArn,
       "arn:aws:iam::123456789012:role/global-role"
     )
     val config = BackfillConfig(
@@ -569,14 +436,14 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     )
     val hadoopConf = new Configuration(false)
     hadoopConf.set(
-      BackfillConfig.HadoopOssCredentialsProvider,
+      HadoopKeys.OssCredentialsProvider,
       BackfillConfig.HadoopOssAssumedRoleProvider
     )
 
     val error = intercept[IllegalArgumentException] {
       config.withHadoopStorageAssumeRole(hadoopConf, "spark-job")
     }
-    error.getMessage should include(BackfillConfig.HadoopOssAssumedRoleArn)
+    error.getMessage should include(HadoopKeys.OssAssumedRoleArn)
   }
 
   test("withHadoopStorageAssumeRole ignores non-AssumeRole AWS config") {
@@ -589,7 +456,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     )
     val hadoopConf = new Configuration(false)
     hadoopConf.set(
-      BackfillConfig.HadoopS3AssumedRoleArn,
+      HadoopKeys.S3AssumedRoleArn,
       "arn:aws:iam::123456789012:role/data-role"
     )
 
@@ -598,7 +465,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     native should not contain key(StorageProperties.RoleArn)
     native should not contain key(StorageProperties.SessionName)
     native should not contain key(StorageProperties.ExternalId)
-    hadoopConf.get(BackfillConfig.HadoopS3AssumedRoleArn) shouldBe
+    hadoopConf.get(HadoopKeys.S3AssumedRoleArn) shouldBe
       "arn:aws:iam::123456789012:role/data-role"
   }
 
@@ -612,7 +479,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     )
     val conf = new Configuration(false)
     conf.set(
-      BackfillConfig.HadoopS3CredentialsProvider,
+      HadoopKeys.S3CredentialsProvider,
       "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider," +
         BackfillConfig.HadoopS3AssumedRoleProvider
     )
@@ -624,16 +491,16 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     native should not contain key(StorageProperties.RoleArn)
     native should not contain key(StorageProperties.AccessKeyId)
     native should not contain key(StorageProperties.AccessKeyValue)
-    conf.get(BackfillConfig.HadoopS3AssumedRoleSessionName) shouldBe null
+    conf.get(HadoopKeys.S3AssumedRoleSessionName) shouldBe null
 
     conf.unset("fs.s3a.access.key")
     conf.unset("fs.s3a.secret.key")
     val error = intercept[IllegalArgumentException] {
       config.withHadoopStorageAssumeRole(conf, "spark-job")
     }
-    error.getMessage should include(BackfillConfig.HadoopS3AssumedRoleArn)
+    error.getMessage should include(HadoopKeys.S3AssumedRoleArn)
     intercept[IllegalArgumentException](config.resolveStorage(conf))
-    conf.get(BackfillConfig.HadoopS3AssumedRoleSessionName) shouldBe null
+    conf.get(HadoopKeys.S3AssumedRoleSessionName) shouldBe null
   }
 
   test(
@@ -649,14 +516,14 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     val hadoopConf = new Configuration(false)
 
     hadoopConf.set(
-      BackfillConfig.HadoopS3CredentialsProvider,
+      HadoopKeys.S3CredentialsProvider,
       BackfillConfig.HadoopS3AssumedRoleProvider
     )
 
     val error = intercept[IllegalArgumentException] {
       config.withHadoopStorageAssumeRole(hadoopConf, "spark-job")
     }
-    error.getMessage should include(BackfillConfig.HadoopS3AssumedRoleArn)
+    error.getMessage should include(HadoopKeys.S3AssumedRoleArn)
   }
 
   test(
@@ -664,11 +531,11 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
   ) {
     val hadoopConf = new Configuration(false)
     hadoopConf.set(
-      BackfillConfig.HadoopS3CredentialsProvider,
+      HadoopKeys.S3CredentialsProvider,
       BackfillConfig.HadoopS3AssumedRoleProvider
     )
     hadoopConf.set(
-      BackfillConfig.HadoopS3AssumedRoleArn,
+      HadoopKeys.S3AssumedRoleArn,
       "arn:aws:iam::123456789012:role/data-role"
     )
     val config = BackfillConfig(
@@ -728,6 +595,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     config.s3Region shouldBe "us-east-1"
     config.s3CloudProvider shouldBe "aws"
     config.batchSize shouldBe 1024
+    config.pkColumnAlias shouldBe false
   }
 
   // ============ getMilvusReadOptions Tests ============
@@ -824,12 +692,12 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     // and the role only after it; the native writer can take one of the two.
     val hadoopConf = new Configuration(false)
     hadoopConf.set(
-      BackfillConfig.HadoopS3CredentialsProvider,
+      HadoopKeys.S3CredentialsProvider,
       "software.amazon.awssdk.auth.credentials.EnvironmentVariableCredentialsProvider," +
         BackfillConfig.HadoopS3AssumedRoleProvider
     )
     hadoopConf.set(
-      BackfillConfig.HadoopS3AssumedRoleArn,
+      HadoopKeys.S3AssumedRoleArn,
       "arn:aws:iam::123456789012:role/data-role"
     )
     val config = BackfillConfig(
@@ -969,9 +837,7 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     ) shouldBe "local"
   }
 
-  test(
-    "explicit binding is validated and does not relax writer or source constraints"
-  ) {
+  test("explicit binding is validated and does not relax writer constraints") {
     BackfillConfig(storageProperties = Map("fs.storage_type" -> "remote"))
       .validate()
       .isLeft shouldBe true
@@ -981,28 +847,24 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     local.copy(batchSize = 0).validate() shouldBe Left(
       "batchSize must be positive"
     )
-    local
-      .copy(sourceS3AccessKey = Some("half-key"))
-      .validate()
-      .isLeft shouldBe true
   }
 
   test("AWS and OSS managed roles coexist without crossing target identities") {
     val conf = new Configuration(false)
     conf.set(
-      BackfillConfig.HadoopS3CredentialsProvider,
+      HadoopKeys.S3CredentialsProvider,
       BackfillConfig.HadoopS3AssumedRoleProvider
     )
     conf.set(
-      BackfillConfig.HadoopS3AssumedRoleArn,
+      HadoopKeys.S3AssumedRoleArn,
       "arn:aws:iam::123456789012:role/aws-data"
     )
     conf.set(
-      BackfillConfig.HadoopOssCredentialsProvider,
+      HadoopKeys.OssCredentialsProvider,
       BackfillConfig.HadoopOssAssumedRoleProvider
     )
     conf.set(
-      BackfillConfig.HadoopOssAssumedRoleArn,
+      HadoopKeys.OssAssumedRoleArn,
       "acs:ram::123456789012:role/oss-data"
     )
     conf.set(
@@ -1020,8 +882,8 @@ class BackfillConfigTest extends AnyFunSuite with Matchers {
     oss.s3RoleArn shouldBe Some("acs:ram::123456789012:role/oss-data")
     aws.resolveStorage(conf)("fs.role_arn") shouldBe aws.s3RoleArn.get
     oss.resolveStorage(conf)("fs.role_arn") shouldBe oss.s3RoleArn.get
-    conf.get(BackfillConfig.HadoopS3AssumedRoleArn) shouldBe aws.s3RoleArn.get
-    conf.get(BackfillConfig.HadoopOssAssumedRoleArn) shouldBe oss.s3RoleArn.get
+    conf.get(HadoopKeys.S3AssumedRoleArn) shouldBe aws.s3RoleArn.get
+    conf.get(HadoopKeys.OssAssumedRoleArn) shouldBe oss.s3RoleArn.get
     BackfillConfig
       .hadoopConfForCloud(conf, "aws")
       .get("hadoop.security.credential.provider.path") shouldBe

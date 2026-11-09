@@ -13,9 +13,8 @@ import org.scalatest.BeforeAndAfterAll
 
 import com.zilliz.milvus.storage.snapshot.json.{CollectionSchemaJson, FieldJson}
 
-/** Unit tests for BackfillApp.parseColumnMapping and
-  * MilvusBackfill.applyColumnMapping — the column-mapping helpers introduced
-  * for backfill parquet schema translation.
+/** Unit tests for MilvusBackfill.applyColumnMapping, which translates backfill
+  * input columns to collection field names.
   */
 class ColumnMappingTest
     extends AnyFunSuite
@@ -36,54 +35,6 @@ class ColumnMappingTest
 
   override def afterAll(): Unit = {
     if (spark != null) spark.stop()
-  }
-
-  // ============ parseColumnMapping ============
-
-  test("parseColumnMapping parses a simple mapping") {
-    BackfillApp.parseColumnMapping("a:x,b:y") shouldBe Map(
-      "a" -> "x",
-      "b" -> "y"
-    )
-  }
-
-  test("parseColumnMapping tolerates whitespace around tokens") {
-    BackfillApp.parseColumnMapping(" a : x , b:y ") shouldBe Map(
-      "a" -> "x",
-      "b" -> "y"
-    )
-  }
-
-  test("parseColumnMapping tolerates trailing comma and empty segments") {
-    BackfillApp.parseColumnMapping("a:x,,b:y,") shouldBe Map(
-      "a" -> "x",
-      "b" -> "y"
-    )
-  }
-
-  test("parseColumnMapping rejects empty input") {
-    val ex = intercept[IllegalArgumentException] {
-      BackfillApp.parseColumnMapping("   ")
-    }
-    ex.getMessage should include("cannot be empty")
-  }
-
-  test("parseColumnMapping rejects malformed entries") {
-    intercept[IllegalArgumentException](BackfillApp.parseColumnMapping("a"))
-    intercept[IllegalArgumentException](BackfillApp.parseColumnMapping(":x"))
-    intercept[IllegalArgumentException](BackfillApp.parseColumnMapping("a:"))
-    val ex = intercept[IllegalArgumentException] {
-      BackfillApp.parseColumnMapping("a:x,bogus")
-    }
-    ex.getMessage should include("bogus")
-  }
-
-  test("parseColumnMapping rejects duplicate source columns") {
-    val ex = intercept[IllegalArgumentException] {
-      BackfillApp.parseColumnMapping("a:x,a:y")
-    }
-    ex.getMessage should include("duplicate source")
-    ex.getMessage should include("a")
   }
 
   // ============ applyColumnMapping ============
@@ -214,7 +165,7 @@ class ColumnMappingTest
     err shouldBe a[SchemaValidationError]
     err.message should include("'pk'")
     err.message should include("'id'")
-    err.message should include("--column-mapping")
+    err.message should include("columnMapping")
   }
 
   test(

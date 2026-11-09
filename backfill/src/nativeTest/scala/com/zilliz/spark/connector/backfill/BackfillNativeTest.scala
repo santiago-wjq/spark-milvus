@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.{JsonNode, ObjectMapper}
 import com.fasterxml.jackson.databind.node.ObjectNode
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.functions.{lit, raise_error}
 import org.apache.spark.sql.types.{LongType, StructField, StructType}
 import org.apache.spark.storage.StorageLevel
 import org.scalatest.funsuite.AnyFunSuite
@@ -26,7 +27,6 @@ import com.zilliz.milvus.storage.snapshot.json.{
   ManifestItemJson,
   SegmentListJson
 }
-import com.zilliz.spark.connector.input.IcebergInput
 import com.zilliz.spark.connector.write.WriteOptions
 import com.zilliz.spark.connector.write.WriteSchema
 import io.milvus.grpc.schema.{CollectionSchema, DataType, FieldSchema}
@@ -89,12 +89,6 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
       .config("spark.sql.adaptive.enabled", "false")
       .getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
-    spark.sparkContext.hadoopConfiguration.set(
-      s"fs.s3a.bucket.${required("BACKFILL_TEST_S3_BUCKET")}.bucket.probe",
-      "0"
-    )
-    // Catalog inputs select their endpoint globally after clearing bucket overrides.
-    spark.sparkContext.hadoopConfiguration.set("fs.s3a.bucket.probe", "0")
   }
   override def afterAll(): Unit = {
     try if (spark != null) spark.stop()
@@ -406,10 +400,11 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
           storageProperties = storage,
           batchSize = 2,
           mode = mode,
-          receiverCapability = receiver
+          receiverCapability = receiver,
+          pkColumnAlias = true
         )
         val result = MilvusBackfill
-          .run(spark, input, source.snapshot.toString, config)
+          .run(spark.read.parquet(input), source.snapshot.toString, config)
           .fold(
             error => {
               error.cause.foreach(_.printStackTrace())
@@ -510,15 +505,15 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
       inputFrame.write.parquet(input)
       val result = MilvusBackfill
         .run(
-          spark,
-          input,
+          spark.read.parquet(input),
           source.snapshot.toString,
           BackfillConfig(
             collectionName = "rows",
             storageProperties = storage,
             mode = "replace",
             batchSize = 2,
-            receiverCapability = BackfillConfig.ManifestDeltaReceiverCapability
+            receiverCapability = BackfillConfig.ManifestDeltaReceiverCapability,
+            pkColumnAlias = true
           )
         )
         .fold(
@@ -682,10 +677,8 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
         result.copy(stagingPrefix = "driver-owned-receipt")
       }
       val failed = MilvusBackfill.runPrepared(
-        spark,
-        input,
+        spark.read.parquet(input),
         source.snapshot.toString,
-        config,
         resolved,
         10L,
         "source",
@@ -703,10 +696,8 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
 
       val result = MilvusBackfill
         .runPrepared(
-          spark,
-          input,
+          spark.read.parquet(input),
           source.snapshot.toString,
-          config,
           resolved,
           10L,
           "source",
@@ -743,13 +734,15 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
         storageProperties = storage
       )
       var guardCalls = 0
+      // Evaluating this input fails, so a check that reads it would surface.
+      val unread = inputFrame
+        .withColumnRenamed("pk", "id")
+        .where(raise_error(lit("input must not be read")).isNull)
       Seq((11L, "source", "collection ID"), (10L, "another-snapshot", "name"))
         .foreach { case (collectionId, snapshotName, expectedError) =>
           val result = MilvusBackfill.runPrepared(
-            spark,
-            "does-not-exist-input",
+            unread,
             wrong.toString,
-            config,
             config,
             collectionId,
             snapshotName,
@@ -765,6 +758,33 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
       assert(guardCalls == 0)
       assert(!Files.exists(root.resolve("staging/foreign-snapshot")))
       assertRows(read(storage, source, None), None)
+    }
+  }
+
+  test(
+    "an unreadable snapshot releases the caller's input once before any write"
+  ) {
+    withDirectory { root =>
+      val storage = localStorage(root)
+      val config = BackfillConfig(storageProperties = storage)
+      var releases = 0
+      val outcome = MilvusBackfill.runPrepared(
+        inputFrame.withColumnRenamed("pk", "id"),
+        root.resolve("missing-snapshot.json").toString,
+        config,
+        10L,
+        "source",
+        () => fail("an unreadable snapshot never reaches the write guard"),
+        snapshotAdapter = BackfillSnapshotAdapter.V3Only,
+        onResult = _ => fail("an unreadable snapshot has no result"),
+        onRecovery = _ => fail("an unreadable snapshot has no recovery"),
+        release = () => releases += 1
+      )
+      val error = outcome.left.toOption.get
+      assert(error.isInstanceOf[SchemaValidationError])
+      assert(error.message.contains("Failed to read snapshot file"))
+      assert(error.cleanupComplete.isEmpty)
+      assert(releases == 1)
     }
   }
 
@@ -810,18 +830,12 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
           assert(input.count() == 5L && prepared.count() == 5L)
           assert(!spark.sparkContext.isStopped)
         }
-        // These path-only settings must never reopen the borrowed Spark plan.
         val config = BackfillConfig(
           collectionName = "rows",
           storageProperties = storage,
           batchSize = 2,
-          mode = "coalesce",
-          inputFormat = "unsupported",
-          icebergSnapshotId = Some("invalid"),
-          sourceS3UseIam = Some(false),
-          sourceS3AccessKey = Some("incomplete-source-identity")
+          mode = "coalesce"
         )
-        assert(config.validate().isLeft)
         val resolved = MilvusBackfill
           .bindConfig(spark, config)
           .fold(error => fail(error.message), identity)
@@ -862,73 +876,61 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
 
   for {
     capability <- Seq("legacy", "manifest-delta-v1")
-    failClose <- Seq(false, true)
+    failRelease <- Seq(false, true)
   } test(
-    s"CLI $capability publishes once before actual input cleanup; close failure=$failClose"
+    s"$capability publishes the result once before the caller's release; release failure=$failRelease"
   ) {
     withDirectory { root =>
       val storage = localStorage(root)
       val source = fixture(root, storage)
-      val input = root.resolve("input")
-      inputFrame.write.parquet(input.toString)
-      val tag = UUID.randomUUID().toString
-      val state = CleanupInputFileSystems.register(tag)
-      state.failClose = failClose
-      val conf = spark.sparkContext.hadoopConfiguration
-      conf.setClass(
-        "fs.cleanup.impl",
-        classOf[CleanupInputFileSystem],
-        classOf[org.apache.hadoop.fs.FileSystem]
-      )
-      conf.setBoolean("fs.cleanup.impl.disable.cache", true)
       val config = BackfillConfig(
         storageProperties = storage,
         receiverCapability = capability,
-        batchSize = 2
+        batchSize = 2,
+        pkColumnAlias = true
       )
-      val resultPath = root.resolve("cli-result.json")
+      val resultPath = root.resolve("result.json")
+      val releaseFailure =
+        new IllegalStateException("caller input release failed")
       var publications = 0
-      try {
-        val outcome = MilvusBackfill.run(
-          spark,
-          s"cleanup://$tag${input.toAbsolutePath}",
-          source.snapshot.toString,
-          config,
-          onResult = result => {
-            publications += 1
-            val recorded = BackfillApp.publishResult(
-              result,
-              resultPath.toString,
-              (value, path) =>
-                BackfillStorage.writeResolvedResultJson(value, path, config)
+      var releases = 0
+      val outcome = MilvusBackfill.run(
+        inputFrame,
+        source.snapshot.toString,
+        config,
+        onResult = result => {
+          publications += 1
+          BackfillStorage
+            .writeResolvedResultJson(result, resultPath.toString, config)
+            .fold(
+              error =>
+                throw new IllegalStateException(
+                  error.message,
+                  error.cause.orNull
+                ),
+              identity
             )
-            state.published = true
-            recorded
-          },
-          onRecovery =
-            _ => fail("complete writes must not publish partial recovery")
-        )
-        assert(publications == 1)
-        assert(state.publishedCloses.get() == 1)
-        val receipt = mapper.readTree(Files.readAllBytes(resultPath))
-        assert(receipt.get("success").asBoolean())
-        assert(receipt.get("totalRowsWritten").asLong() == 6L)
-        if (failClose) {
-          val error = outcome.left.toOption.get
-          assert(error.stage == "cleanup")
-          assert(error.cleanupComplete.contains(false))
-          assert(error.cause.contains(state.cleanupFailure))
-          assert(BackfillApp.complete(outcome) == 1)
-        } else {
-          assert(outcome.isRight)
-          assert(BackfillApp.complete(outcome) == 0)
+          result
+        },
+        onRecovery =
+          _ => fail("complete writes must not publish partial recovery"),
+        release = () => {
+          releases += 1
+          assert(publications == 1, "the result is published before release")
+          if (failRelease) throw releaseFailure
         }
-        assertRows(read(storage, source, None), None)
-      } finally {
-        conf.unset("fs.cleanup.impl")
-        conf.unset("fs.cleanup.impl.disable.cache")
-        CleanupInputFileSystems.remove(tag)
-      }
+      )
+      assert(publications == 1 && releases == 1)
+      val receipt = mapper.readTree(Files.readAllBytes(resultPath))
+      assert(receipt.get("success").asBoolean())
+      assert(receipt.get("totalRowsWritten").asLong() == 6L)
+      if (failRelease) {
+        val error = outcome.left.toOption.get
+        assert(error.stage == "cleanup")
+        assert(error.cleanupComplete.contains(false))
+        assert(error.cause.contains(releaseFailure))
+      } else assert(outcome.isRight)
+      assertRows(read(storage, source, None), None)
     }
   }
 
@@ -1199,34 +1201,23 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
     batchSize = 2,
     mode = "overwrite"
   )
-  private def hadoopOptions(
-      config: BackfillConfig,
-      path: String
-  ): Map[String, String] =
-    BackfillStorage
-      .inputBinding(spark, path, config)
-      .newHadoopConfiguration()
-      .iterator()
-      .asScala
-      .map(entry => entry.getKey -> entry.getValue)
-      .toMap
-
   test(
-    "run binds legacy main S3 credentials to input when there are no source overrides"
+    "a prefix-scoped S3 target identity writes segments and its result receipt"
   ) {
     withDirectory { root =>
-      val config = s3Config
+      val config = s3Config.copy(pkColumnAlias = true)
       val storage = config.resolveStorage(spark.sessionState.newHadoopConf())
+      // The fixture and every backfill write go through the target identity,
+      // which may not run the bucket check a native directory create starts
+      // with.
       val source = fixture(root, storage)
-      val path = s"s3a://${config.s3BucketName}/${config.s3RootPath}/input"
-      inputFrame.write.options(hadoopOptions(config, path)).parquet(path)
       val before = spark.sparkContext.hadoopConfiguration
         .iterator()
         .asScala
         .map(e => e.getKey -> e.getValue)
         .toMap
       val result = MilvusBackfill
-        .run(spark, path, source.snapshot.toString, config)
+        .run(inputFrame, source.snapshot.toString, config)
         .fold(
           error => {
             error.cause.foreach(_.printStackTrace())
@@ -1238,6 +1229,22 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
           identity
         )
       assertRows(read(storage, source, Some(result)), Some("overwrite"))
+      val receipt =
+        s"s3a://${config.s3BucketName}/${config.s3RootPath}/receipts/result.json"
+      BackfillStorage
+        .writeResultJson(spark, result, receipt, config)
+        .fold(error => fail(error.message, error.cause.orNull), identity)
+      val store = NativeObjectStore.Factory(storage).open()
+      try
+        assert(
+          mapper
+            .readTree(
+              store.readAll(s"${config.s3RootPath}/receipts/result.json")
+            )
+            .get("totalRowsWritten")
+            .asLong() == 6L
+        )
+      finally store.close()
       val after = spark.sparkContext.hadoopConfiguration
         .iterator()
         .asScala
@@ -1246,89 +1253,4 @@ final class BackfillNativeTest extends AnyFunSuite with BeforeAndAfterAll {
       assert(after == before)
     }
   }
-
-  // Lines without an Iceberg runtime cover the refusal in IcebergInputTest.
-  if (IcebergInput.available)
-    test(
-      "run gives explicit Iceberg source identity priority over inherited same-bucket target credentials"
-    ) {
-      withDirectory { root =>
-        val base = s3Config
-        val config = base.copy(
-          storageProperties = localStorage(root),
-          inputFormat = "iceberg",
-          sourceS3Endpoint = Some(required("BACKFILL_TEST_S3_ENDPOINT")),
-          sourceS3AccessKey =
-            Some(required("BACKFILL_TEST_S3_SOURCE_ACCESS_KEY")),
-          sourceS3SecretKey =
-            Some(required("BACKFILL_TEST_S3_SOURCE_SECRET_KEY")),
-          sourceS3UseIam = Some(false),
-          sourceS3UseSSL = Some(false),
-          sourceS3Region = Some("us-east-1")
-        )
-        val source = fixture(root, config.storageProperties)
-        val catalog =
-          "backfillinput" + UUID.randomUUID().toString.replace("-", "")
-        val property = s"spark.sql.catalog.$catalog"
-        val warehouse = s"s3a://${base.s3BucketName}/source/$catalog/warehouse"
-        spark.conf.set(property, "org.apache.iceberg.spark.SparkCatalog")
-        spark.conf.set(property + ".type", "hadoop")
-        spark.conf.set(property + ".warehouse", warehouse)
-        hadoopOptions(config, warehouse).foreach { case (key, value) =>
-          spark.conf.set(s"$property.hadoop.$key", value)
-        }
-        spark.sql(
-          s"CREATE TABLE $catalog.db.rows (pk BIGINT, n BIGINT) USING iceberg"
-        )
-        spark.sql(
-          s"INSERT INTO $catalog.db.rows VALUES (1, NULL), (2, 200), (3, 300), (5, 500), (99, 9900)"
-        )
-        val conf = spark.sparkContext.hadoopConfiguration
-        val prefix = s"fs.s3a.bucket.${base.s3BucketName}."
-        val target = Map(
-          prefix + "access.key" -> base.s3AccessKey,
-          prefix + "secret.key" -> base.s3SecretKey,
-          prefix + "aws.credentials.provider" -> "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
-        )
-        val previous =
-          target.keys.map(key => key -> Option(conf.get(key))).toMap
-        try {
-          target.foreach { case (key, value) =>
-            conf.set(key, value)
-            spark.conf.set(s"$property.hadoop.$key", value)
-          }
-          val result = MilvusBackfill
-            .run(spark, s"$catalog.db.rows", source.snapshot.toString, config)
-            .fold(
-              error => {
-                error.cause.foreach(_.printStackTrace())
-                fail(
-                  error.message,
-                  error.cause
-                    .getOrElse(new IllegalStateException(error.message))
-                )
-              },
-              identity
-            )
-          assert(result.inputSnapshotId.nonEmpty)
-          assert(
-            mapper
-              .readTree(result.toJson)
-              .get("inputSnapshotId")
-              .asLong() == result.inputSnapshotId.get
-          )
-          assertRows(
-            read(config.storageProperties, source, Some(result)),
-            Some("overwrite")
-          )
-          target.foreach { case (key, value) => assert(conf.get(key) == value) }
-        } finally
-          previous.foreach { case (key, value) =>
-            value match {
-              case Some(text) => conf.set(key, text)
-              case None       => conf.unset(key)
-            }
-          }
-      }
-    }
 }

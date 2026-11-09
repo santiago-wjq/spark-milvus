@@ -26,7 +26,7 @@ lazy val root = project
   .in(file("."))
   .aggregate(
     (Seq[ProjectReference](nativeRuntime, nativeStorage, core, spark) ++
-      (if (Versions.selectedBackfill.isDefined) Seq[ProjectReference](backfill)
+      (if (Versions.selectedBackfill) Seq[ProjectReference](backfill)
        else Seq.empty)): _*
   )
   .settings(
@@ -244,10 +244,10 @@ lazy val spark = Project("spark", file("spark"))
   )
   .settings(lineBundle(Versions.selected))
 
-// Optional offline backfill calculation and input bindings. The reader graph
-// remains independent of this application layer and of Iceberg. Iceberg input
-// compiles only on lines with an Iceberg runtime; Modules.backfillSources
-// selects its source root.
+// Optional offline backfill of an existing snapshot from a caller's DataFrame.
+// The reader graph remains independent of this module. The caller reads its
+// input with its own format and identity; backfill depends on neither an input
+// format nor Iceberg.
 lazy val BackfillNativeTest = config("nativeTest") extend Test
 lazy val backfill = Project("backfill", file("backfill"))
   .dependsOn(
@@ -268,12 +268,9 @@ lazy val backfill = Project("backfill", file("backfill"))
     ThinArtifacts.settings("backfill", Versions.selected.javaRelease),
     publish / skip := true,
     libraryDependencies ++= Dependencies.sparkDeps(Versions.selected) ++ Seq(
-      scalaTest % Test,
-      hadoopAws.withConfigurations(Some("test")),
-      "org.apache.hadoop" % "hadoop-aliyun" % Versions.selected.hadoop % Test
-    ) ++ Dependencies.iceberg(Versions.selected),
+      scalaTest % Test
+    ),
     dependencyOverrides ++= Dependencies.lineOverrides(Versions.selected),
-    Modules.backfillSources(Versions.selected),
     inConfig(Test)(Modules.nativeTest),
     inConfig(BackfillNativeTest)(Modules.nativeTest),
     BackfillNativeTest / testOptions += Tests.Argument(
@@ -282,15 +279,12 @@ lazy val backfill = Project("backfill", file("backfill"))
       (target.value / "native-test-reports").getAbsolutePath
     ),
     assembly / assemblyJarName := s"spark-milvus-backfill-${Versions.selected.id}_${scalaBinaryVersion.value}-${version.value}.jar",
-    Compile / mainClass := Some(
-      "com.zilliz.spark.connector.backfill.BackfillApp"
-    ),
     Modules.backfillBoundary,
     BackfillNativeTest / dependencyClasspath ++= (Test / fullClasspath).value,
     BackfillNativeTest / unmanagedResourceDirectories += (core / Test / resourceDirectory).value,
     Compile / compile := {
       require(
-        Versions.selectedBackfill.isDefined,
+        Versions.selectedBackfill,
         s"Backfill supports Spark ${Versions.backfillLines.map(_.id).mkString(" and ")} " +
           s"with Scala 2.13 only, not Spark ${Versions.selected.id} with Scala ${Versions.selectedScala}"
       )

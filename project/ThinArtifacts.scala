@@ -75,7 +75,7 @@ object ThinArtifacts {
     val product =
       if (modules.exists(_.projectId == "backfill")) "backfill" else "reader"
     require(
-      product != "backfill" || (line.backfill.isDefined && scalaBinary == "2.13"),
+      product != "backfill" || (line.backfill && scalaBinary == "2.13"),
       s"Backfill releases support Spark ${Versions.backfillLines.map(_.id).mkString(" and ")} / Scala 2.13"
     )
     val expected = Set("native-runtime", "native-storage", "core", "spark") ++
@@ -398,7 +398,7 @@ object ThinArtifacts {
       case "spark" =>
         "Spark snapshot DataSource and Arrow write interfaces."
       case "backfill" =>
-        "Offline field backfill over existing snapshots and inputs."
+        "Offline field backfill of existing snapshots from a DataFrame."
       case other => sys.error(s"Unknown thin module: $other")
     }
     s"Spark Milvus thin module. $purpose"

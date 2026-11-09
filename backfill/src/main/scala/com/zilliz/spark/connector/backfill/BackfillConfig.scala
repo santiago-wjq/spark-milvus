@@ -51,62 +51,43 @@ case class BackfillConfig(
     s3RootPath: String = "files",
     s3Region: String = "us-east-1",
     s3CloudProvider: String = BackfillConfig.DefaultCloudProvider,
-    // When true, both Milvus FFI and Spark Hadoop S3A use the default credentials
-    // chain (env / web identity / instance profile) instead of static AK/SK.
+    // When true, native storage uses the default credentials chain (env / web
+    // identity / instance profile) instead of static AK/SK.
     s3UseIam: Boolean = false,
-
-    // Optional separate credentials for the backfill *input* parquet bucket.
-    // When set, these are used (via Hadoop per-bucket S3A config) to read the
-    // backfill data parquet, while the main s3* fields above continue to be
-    // used for snapshot reads and segment writes (Milvus storage bucket).
-    // Leave as None to reuse the main credentials for both buckets.
-    sourceS3Endpoint: Option[String] = None,
-    sourceS3AccessKey: Option[String] = None,
-    sourceS3SecretKey: Option[String] = None,
-    sourceS3UseSSL: Option[Boolean] = None,
-    sourceS3UseIam: Option[Boolean] = None,
-    sourceS3Region: Option[String] = None,
-
-    // Input data source format. "parquet" and "iceberg" have readers; "lance"
-    // is recognized as a valid format name but has no reader yet, so
-    // validate() rejects it until a reader lands.
-    inputFormat: String = BackfillConfig.DefaultInputFormat,
-
-    // Iceberg input read options. snapshot-id time-travels the input table to
-    // a specific Iceberg snapshot so a long-running backfill reads a stable
-    // view; ignored when inputFormat != "iceberg" (validate() rejects that
-    // combination).
-    icebergSnapshotId: Option[String] = None,
 
     // Writer configuration
     batchSize: Int = 1024,
 
-    // Optional mapping: parquet column name -> Milvus field name.
-    // When set, the backfill parquet is reprojected through this map before
-    // join/write: parquet columns not listed as keys are dropped, and each
-    // listed column is renamed to its target. The value set must contain the
-    // configured join field so the identity column can be consumed after
-    // renaming. With the default primary-key join and no mapping, legacy
-    // behavior applies: the parquet must contain a literal "pk" column plus
-    // one or more field columns. With a physical join field and no mapping,
-    // the parquet must contain that exact field name.
+    // Optional mapping: input column name -> Milvus field name.
+    // When set, the input is reprojected through this map before join/write:
+    // input columns not listed as keys are dropped, and each listed column is
+    // renamed to its target. The value set must contain the configured join
+    // field so the identity column can be consumed after renaming. Without a
+    // mapping, input columns use the collection's field names.
     columnMapping: Option[Map[String, String]] = None,
+
+    // Without a mapping and with the default primary-key join, a literal "pk"
+    // input column carries the primary key instead of the key field's own
+    // name; the input must not also contain that field. This is the
+    // command-line input convention. A physical join field is always named as
+    // in the collection.
+    pkColumnAlias: Boolean = false,
 
     // Merge mode for backfill values:
     //   "coalesce" (default) — read the target field's current value from
-    //     the snapshot and pick coalesce(snapshot, parquet) per row per field (snapshot
-    //     wins when non-null; parquet fills nulls). Unmatched snapshot rows
-    //     keep their original target values.
-    //   "overwrite" — parquet overrides the target field for rows whose join
+    //     the snapshot and pick coalesce(snapshot, input) per row per field
+    //     (snapshot wins when non-null; input fills nulls). Unmatched snapshot
+    //     rows keep their original target values.
+    //   "overwrite" — input overrides the target field for rows whose join
     //     key matches (null included). Unmatched snapshot rows keep their
     //     original target values.
-    //   "replace" — parquet is the absolute source of truth: every snapshot
-    //     row's target field becomes the parquet value (null if the join key
-    //     has no parquet match). Destructive on unmatched rows.
+    //   "replace" — input is the absolute source of truth: every snapshot
+    //     row's target field becomes the input value (null if the join key
+    //     has no input match). Destructive on unmatched rows.
     mode: String = BackfillConfig.ModeCoalesce,
 
-    // Optional main-storage AssumeRole settings. BackfillApp derives these
-    // from an existing Hadoop S3A configuration when the runtime platform has
+    // Optional main-storage AssumeRole settings. Backfill derives these from
+    // the session's Hadoop S3A configuration when the runtime platform has
     // already selected a data role for the job.
     s3RoleArn: Option[String] = None,
     s3RoleSessionName: Option[String] = None,
@@ -133,12 +114,10 @@ case class BackfillConfig(
   def readsSnapshotFields: Boolean =
     mode != BackfillConfig.ModeReplace
 
-  /** Path inputs require both target/writer and independent input settings. */
-  def validate(): Either[String, Unit] =
-    validateTarget().flatMap(_ => validateInput())
-
-  /** A borrowed DataFrame already owns its source plan and input identity. */
-  def validateTarget(): Either[String, Unit] = {
+  /** Validates the target storage and write settings. The input DataFrame
+    * already owns its source plan and input identity.
+    */
+  def validate(): Either[String, Unit] = {
     val normalizedCloudProvider = s3CloudProvider.trim
     val normalizedRoleArn = s3RoleArn.map(_.trim).filter(_.nonEmpty)
     val hasRoleDetails =
@@ -216,56 +195,6 @@ case class BackfillConfig(
     } else if (legacyStorage && normalizedRoleArn.isEmpty && hasRoleDetails) {
       Left("s3RoleSessionName and s3ExternalId require s3RoleArn")
     } else Right(())
-  }
-
-  private def validateInput(): Either[String, Unit] = {
-    if (!BackfillConfig.AllowedInputFormats.contains(inputFormat.trim)) {
-      Left(
-        s"inputFormat must be one of ${BackfillConfig.AllowedInputFormats
-            .mkString("[", ", ", "]")} (got '$inputFormat')"
-      )
-    } else if (
-      !BackfillConfig.ImplementedInputFormats.contains(inputFormat.trim)
-    ) {
-      Left(
-        s"inputFormat '$inputFormat' is recognized but not yet implemented; " +
-          s"only ${BackfillConfig.ImplementedInputFormats.mkString("[", ", ", "]")} " +
-          "have a reader"
-      )
-    } else if (
-      inputFormat.trim != "iceberg" && icebergSnapshotId.exists(_.trim.nonEmpty)
-    ) {
-      Left("icebergSnapshotId requires inputFormat='iceberg'")
-    } else if (
-      inputFormat.trim == "iceberg" && icebergSnapshotId.exists { id =>
-        id.trim.nonEmpty && scala.util.Try(id.trim.toLong).isFailure
-      }
-    ) {
-      Left(
-        s"icebergSnapshotId must be an integer snapshot id " +
-          s"(got '${icebergSnapshotId.get}')"
-      )
-    } else {
-      // Same invariant for the source (input parquet) bucket. Any field
-      // left as None falls back to the main credentials, which we already
-      // validated above, so we only fail when an asymmetric override would
-      // produce half-set static credentials.
-      val srcUseIam = sourceS3UseIam.getOrElse(s3UseIam)
-      val srcAk = sourceS3AccessKey.getOrElse(s3AccessKey)
-      val srcSk = sourceS3SecretKey.getOrElse(s3SecretKey)
-      val sourceOverride =
-        sourceS3AccessKey.isDefined || sourceS3SecretKey.isDefined || sourceS3UseIam.isDefined
-      if (
-        (storageProperties.isEmpty || sourceOverride) && !srcUseIam && (srcAk.isEmpty || srcSk.isEmpty)
-      ) {
-        Left(
-          "source bucket: sourceS3AccessKey and sourceS3SecretKey must both " +
-            "be set unless sourceS3UseIam=true (or fall back to main)"
-        )
-      } else {
-        Right(())
-      }
-    }
   }
 
   /** Get base Milvus read options as a Map for DataSource. The resolved join
@@ -427,34 +356,8 @@ object BackfillConfig {
   private[backfill] val NativeAssumeRoleCloudProviders =
     Set("aws", "aliyun", "tencent")
 
-  private[backfill] val DefaultInputFormat = "parquet"
-  private[backfill] val AllowedInputFormats =
-    Set("parquet", "iceberg", "lance")
-  // Subset of AllowedInputFormats with a working reader. validate() rejects
-  // recognized-but-unimplemented formats here (fail-fast at config time), and
-  // readBackfillData guards its per-format dispatch on the same set so the two
-  // cannot drift. Each new reader extends this set and adds a dispatch arm.
-  private[backfill] val ImplementedInputFormats = Set("parquet", "iceberg")
-
-  private[backfill] val HadoopS3CredentialsProvider =
-    "fs.s3a.aws.credentials.provider"
-  private[backfill] val HadoopS3AssumedRoleArn =
-    "fs.s3a.assumed.role.arn"
-  private[backfill] val HadoopS3AssumedRoleSessionName =
-    "fs.s3a.assumed.role.session.name"
-  private[backfill] val HadoopS3AssumedRoleExternalId =
-    "fs.s3a.assumed.role.external.id"
   private[backfill] val HadoopS3AssumedRoleProvider =
     "org.apache.hadoop.fs.s3a.auth.AssumedRoleCredentialProvider"
-  private[backfill] val HadoopOssAssumedRoleArn =
-    "fs.oss.assumed.role.arn"
-  private[backfill] val HadoopOssCredentialsProvider =
-    "fs.oss.credentials.provider"
-  private[backfill] val HadoopOssSecurityToken = "fs.oss.securityToken"
-  private[backfill] val HadoopOssAssumedRoleSessionName =
-    "fs.oss.assumed.role.session.name"
-  private[backfill] val HadoopOssAssumedRoleExternalId =
-    "fs.oss.assumed.role.external.id"
   private[backfill] val HadoopOssAssumedRoleProvider =
     "com.zilliz.cloud.hadoop.AliyunOSSRoleCredentialsProvider"
 

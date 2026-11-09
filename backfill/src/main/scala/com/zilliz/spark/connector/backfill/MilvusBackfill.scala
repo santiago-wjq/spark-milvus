@@ -27,11 +27,6 @@ import com.zilliz.spark.connector.backfill.BackfillSegmentWrite.{
   RowOffsetCol,
   SegmentIdCol
 }
-import com.zilliz.spark.connector.input.{
-  InputAdapter,
-  InputOptions,
-  InputSource
-}
 import com.zilliz.spark.connector.options.MilvusOption
 import com.zilliz.spark.connector.table.SnapshotSparkSchema
 import io.milvus.grpc.schema.{CollectionSchema, DataType => MilvusDataType}
@@ -43,11 +38,6 @@ import io.milvus.grpc.schema.{CollectionSchema, DataType => MilvusDataType}
   * and writing per-segment binlog files.
   */
 object MilvusBackfill {
-
-  private sealed trait BackfillInput
-  private final case class PathInput(path: String, config: BackfillConfig)
-      extends BackfillInput
-  private final case class FrameInput(frame: DataFrame) extends BackfillInput
 
   private[backfill] def resolveResultPartitionId(
       partitionIDs: Set[Long]
@@ -266,7 +256,7 @@ object MilvusBackfill {
         SchemaValidationError(
           "Backfill target columns collide with names reserved for internal " +
             s"use by the backfill join: ${collisions.mkString(", ")}. " +
-            "Rename the column (or use --column-mapping) and retry."
+            "Rename the column (or map it with columnMapping) and retry."
         )
       )
     } else {
@@ -274,104 +264,73 @@ object MilvusBackfill {
     }
   }
 
-  /** Backfill new fields into a Milvus collection
+  /** Backfill new fields of an existing snapshot from a DataFrame.
     *
-    * @param spark
-    *   SparkSession
-    * @param backfillDataPath
-    *   Path to Parquet file containing the configured join key and new field
-    *   data
+    * The caller owns the input DataFrame, its session, source, caches and the
+    * identity it reads with. Its columns use the collection's field names
+    * unless `columnMapping` or `pkColumnAlias` says otherwise. onResult runs
+    * once on the driver after successful computation, before the backfill
+    * releases its own resources; it can durably record and return the result.
+    * onRecovery receives incomplete segment outcomes before cleanup without
+    * invoking onResult. release then runs together with that cleanup, for
+    * resources the caller's input holds; its failure fails the operation at the
+    * cleanup stage. Driver callbacks are never serialized into Spark tasks.
+    *
+    * @param input
+    *   Non-streaming rows carrying the join key and the fields to backfill
     * @param snapshotPath
-    *   Path to Milvus snapshot metadata JSON file
-    * @param config
-    *   Backfill configuration
+    *   Path to the Milvus snapshot metadata JSON file
+    * @param initialConfig
+    *   Target storage and write settings
     * @return
     *   Either error or successful result
     */
   def run(
-      spark: SparkSession,
-      backfillDataPath: String,
+      input: DataFrame,
       snapshotPath: String,
       initialConfig: BackfillConfig,
       snapshotAdapter: BackfillSnapshotAdapter = BackfillSnapshotAdapter.V3Only,
       onResult: BackfillResult => BackfillResult = identity,
-      onRecovery: BackfillRecovery => Unit = _ => ()
-  ): Either[BackfillError, BackfillResult] = {
-    val validatedConfig = validateConfig(spark, initialConfig) match {
-      case Left(error)   => return Left(error)
-      case Right(config) => config
-    }
-    if (Option(snapshotPath).forall(_.trim.isEmpty)) {
-      return Left(
-        SchemaValidationError(
-          "ADDFIELD backfill requires collection schema from a snapshot"
+      onRecovery: BackfillRecovery => Unit = _ => (),
+      release: () => Unit = () => ()
+  ): Either[BackfillError, BackfillResult] =
+    releasing(release) { once =>
+      if (input == null || input.isStreaming)
+        Left(
+          SchemaValidationError("Backfill requires a non-streaming DataFrame")
         )
-      )
+      else if (Option(snapshotPath).forall(_.trim.isEmpty))
+        Left(
+          SchemaValidationError("Backfill requires an existing snapshot path")
+        )
+      else
+        bindConfig(input.sparkSession, initialConfig).flatMap { config =>
+          runInternal(
+            input,
+            snapshotPath,
+            config,
+            expectedSnapshot = None,
+            beforeWrite = () => (),
+            snapshotAdapter = snapshotAdapter,
+            onResult = onResult,
+            onRecovery = onRecovery,
+            release = once
+          )
+        }
     }
-    resolveValidatedConfig(spark, validatedConfig).flatMap { config =>
-      runInternal(
-        spark,
-        PathInput(backfillDataPath, initialConfig),
-        snapshotPath,
-        config,
-        collectionFieldNames = false,
-        expectedSnapshot = None,
-        beforeWrite = () => (),
-        snapshotAdapter = snapshotAdapter,
-        onResult = onResult,
-        onRecovery = onRecovery
-      )
-    }
-  }
 
-  /** Borrow an existing DataFrame and leave its session, source and caches
-    * owned by the caller. Column names are resolved against the snapshot
-    * schema.
-    */
-  def run(
-      input: DataFrame,
-      snapshotPath: String,
-      initialConfig: BackfillConfig
-  ): Either[BackfillError, BackfillResult] = {
-    if (input == null || input.isStreaming)
-      return Left(
-        SchemaValidationError("Backfill requires a non-streaming DataFrame")
-      )
-    if (Option(snapshotPath).forall(_.trim.isEmpty))
-      return Left(
-        SchemaValidationError("Backfill requires an existing snapshot path")
-      )
-    bindConfig(input.sparkSession, initialConfig).flatMap { config =>
-      runInternal(
-        input.sparkSession,
-        FrameInput(input),
-        snapshotPath,
-        config,
-        collectionFieldNames = true,
-        expectedSnapshot = None,
-        beforeWrite = () => (),
-        snapshotAdapter = BackfillSnapshotAdapter.V3Only,
-        onResult = identity,
-        onRecovery = _ => ()
-      )
-    }
-  }
-
-  /** Bind the target once while retaining the caller's independent input
-    * identity.
-    */
+  /** Validate and resolve the target once on the driver. */
   def bindConfig(
       spark: SparkSession,
       initialConfig: BackfillConfig
   ): Either[BackfillError, BackfillConfig] =
-    validateConfig(spark, initialConfig, includeInput = false).flatMap(
+    validateConfig(spark, initialConfig).flatMap(
       resolveValidatedConfig(spark, _)
     )
 
   private def validateConfig(
       spark: SparkSession,
-      initialConfig: BackfillConfig,
-      includeInput: Boolean = true
+      initialConfig: BackfillConfig
   ): Either[BackfillError, BackfillConfig] = {
     val validatedConfig =
       try {
@@ -388,11 +347,7 @@ object MilvusBackfill {
           )
       }
 
-    // Validate S3/writer configuration (always required)
-    val validation =
-      if (includeInput) validatedConfig.validate()
-      else validatedConfig.validateTarget()
-    validation match {
+    validatedConfig.validate() match {
       case Left(error) =>
         Left(SchemaValidationError(s"Invalid configuration: $error"))
       case Right(_) => Right(validatedConfig)
@@ -419,44 +374,12 @@ object MilvusBackfill {
     }
   }
 
-  /** Uses an already resolved storage identity and validates the expected
-    * collection/snapshot before writing. Input columns use collection field
-    * names. beforeWrite runs after validation, immediately before writing.
-    * onResult runs once on the driver after successful computation, before
-    * owned resources close. It can durably record and return the result;
-    * failures in it or subsequent cleanup still fail the operation. onRecovery
-    * receives incomplete segment outcomes before cleanup without invoking
-    * onResult. Driver callbacks are never serialized into Spark tasks.
-    */
-  def runPrepared(
-      spark: SparkSession,
-      backfillDataPath: String,
-      snapshotPath: String,
-      inputConfig: BackfillConfig,
-      resolvedConfig: BackfillConfig,
-      expectedCollectionId: Long,
-      expectedSnapshotName: String,
-      beforeWrite: () => Unit,
-      snapshotAdapter: BackfillSnapshotAdapter,
-      onResult: BackfillResult => BackfillResult,
-      onRecovery: BackfillRecovery => Unit
-  ): Either[BackfillError, BackfillResult] =
-    runInternal(
-      spark,
-      PathInput(backfillDataPath, inputConfig),
-      snapshotPath,
-      resolvedConfig,
-      collectionFieldNames = true,
-      expectedSnapshot = Some(expectedCollectionId -> expectedSnapshotName),
-      beforeWrite = beforeWrite,
-      snapshotAdapter = snapshotAdapter,
-      onResult = onResult,
-      onRecovery = onRecovery
-    )
-
   /** Borrow a caller's resolved Spark plan without reopening or closing its
-    * source. onResult has the same driver and cleanup contract as the path
-    * overload.
+    * source, using an already resolved storage identity, and validate the
+    * expected collection and snapshot before writing. beforeWrite runs after
+    * validation, immediately before writing. onResult, onRecovery and release
+    * have the same driver and cleanup contract as in run; failures in onResult
+    * or in the subsequent cleanup still fail the operation.
     */
   def runPrepared(
       input: DataFrame,
@@ -467,44 +390,89 @@ object MilvusBackfill {
       beforeWrite: () => Unit,
       snapshotAdapter: BackfillSnapshotAdapter,
       onResult: BackfillResult => BackfillResult,
-      onRecovery: BackfillRecovery => Unit
+      onRecovery: BackfillRecovery => Unit,
+      release: () => Unit = () => ()
+  ): Either[BackfillError, BackfillResult] =
+    releasing(release) { once =>
+      if (input == null || input.isStreaming)
+        Left(
+          SchemaValidationError("Backfill requires a non-streaming DataFrame")
+        )
+      else
+        runInternal(
+          input,
+          snapshotPath,
+          resolvedConfig,
+          expectedSnapshot = Some(expectedCollectionId -> expectedSnapshotName),
+          beforeWrite = beforeWrite,
+          snapshotAdapter = snapshotAdapter,
+          onResult = onResult,
+          onRecovery = onRecovery,
+          release = once
+        )
+    }
+
+  /** Runs the caller's release exactly once. The computation releases it with
+    * its own resources; an operation that fails before reaching them, such as a
+    * rejected configuration or an unreadable snapshot, releases it here. A
+    * successful release leaves that outcome unchanged; a failed one fails the
+    * operation and marks its cleanup incomplete.
+    */
+  private def releasing(release: () => Unit)(
+      operation: (() => Unit) => Either[BackfillError, BackfillResult]
   ): Either[BackfillError, BackfillResult] = {
-    if (input == null || input.isStreaming)
-      return Left(
-        SchemaValidationError("Backfill requires a non-streaming DataFrame")
-      )
-    runInternal(
-      input.sparkSession,
-      FrameInput(input),
-      snapshotPath,
-      resolvedConfig,
-      collectionFieldNames = true,
-      expectedSnapshot = Some(expectedCollectionId -> expectedSnapshotName),
-      beforeWrite = beforeWrite,
-      snapshotAdapter = snapshotAdapter,
-      onResult = onResult,
-      onRecovery = onRecovery
-    )
+    var released = false
+    val once = () => if (!released) { released = true; release() }
+    val outcome =
+      try operation(once)
+      catch {
+        case error: Throwable =>
+          WriterResources.closeAll(error, once)
+          throw error
+      }
+    if (released) outcome
+    else
+      try { once(); outcome }
+      catch {
+        case failure: Exception =>
+          outcome match {
+            case Right(_) =>
+              Left(
+                BackfillExecutionError(
+                  "cleanup",
+                  s"Failed to release backfill resources: ${failure.getMessage}",
+                  Some(failure),
+                  cleanupComplete = Some(false)
+                )
+              )
+            case Left(error) =>
+              val withFailure = error.cause match {
+                case Some(cause) => cause.addSuppressed(failure); error
+                case None        => BackfillError.withCause(error, failure)
+              }
+              Left(
+                BackfillError.withCleanupStatus(withFailure, complete = false)
+              )
+          }
+      }
   }
 
   private def runInternal(
-      spark: SparkSession,
-      input: BackfillInput,
+      input: DataFrame,
       snapshotPath: String,
       config: BackfillConfig,
-      collectionFieldNames: Boolean,
       expectedSnapshot: Option[(Long, String)],
       beforeWrite: () => Unit,
       snapshotAdapter: BackfillSnapshotAdapter,
       onResult: BackfillResult => BackfillResult,
-      onRecovery: BackfillRecovery => Unit
+      onRecovery: BackfillRecovery => Unit,
+      release: () => Unit
   ): Either[BackfillError, BackfillResult] = {
     val startTime = System.currentTimeMillis()
     val runConfig = config
+    val spark = input.sparkSession
 
-    var inputSnapshotId: Option[Long] = None
     var cachedBackfillDF: DataFrame = null
-    var inputSource: InputSource = null
 
     logger.info(s"Backfill mode: ${config.mode}")
 
@@ -569,17 +537,7 @@ object MilvusBackfill {
           s"fieldIds=${baseJoinKey.fieldIds.mkString(",")}"
       )
 
-      val rawBackfillDF = input match {
-        case FrameInput(frame) => frame
-        case PathInput(path, inputConfig) =>
-          readBackfillData(spark, path, inputConfig) match {
-            case Left(error) => return Left(error)
-            case Right(source) =>
-              inputSource = source
-              inputSnapshotId = source.icebergSnapshotId
-              source.dataFrame
-          }
-      }
+      val rawBackfillDF = input
 
       // Reproject via the selected join-key mapping contract, then separate
       // the join component from fields that will be written. The join column is
@@ -592,7 +550,7 @@ object MilvusBackfill {
         managedColumnMapping(
           rawBackfillDF.columns.toSeq,
           config.columnMapping,
-          collectionFieldNames
+          collectionFieldNames = !config.pkColumnAlias
         ),
         snapshotMetadata.collection.schema.fields.map(_.name)
       ) match {
@@ -788,7 +746,7 @@ object MilvusBackfill {
               newFieldNames,
               totalBackfillDataRows = backfillRowCount
             )
-            .copy(success = false, inputSnapshotId = inputSnapshotId)
+            .copy(success = false)
           val recovery = BackfillRecovery(partial, error.failedSegmentIds)
           try onRecovery(recovery)
           catch {
@@ -831,7 +789,7 @@ object MilvusBackfill {
         totalBackfillDataRows = backfillRowCount
       )
 
-      try Right(onResult(result.copy(inputSnapshotId = inputSnapshotId)))
+      try Right(onResult(result))
       catch {
         case publication: Exception =>
           Left(
@@ -846,7 +804,7 @@ object MilvusBackfill {
     }
     withCleanup(
       () => { if (cachedBackfillDF != null) cachedBackfillDF.unpersist(); () },
-      () => { if (inputSource != null) inputSource.close() }
+      release
     )(execute())
   }
 
@@ -920,35 +878,6 @@ object MilvusBackfill {
     }
   }
 
-  /** Bind input identity on the driver before creating its lazy scan. */
-  private def readBackfillData(
-      spark: SparkSession,
-      rawPath: String,
-      config: BackfillConfig
-  ): Either[BackfillError, InputSource] = {
-    try {
-      val path = BackfillStorage.normalizeObjectStorageScheme(rawPath, config)
-      val binding = BackfillStorage.inputBinding(spark, path, config)
-      Right(
-        InputAdapter.read(
-          spark,
-          path,
-          InputOptions(config.inputFormat.trim, config.icebergSnapshotId),
-          binding
-        )
-      )
-    } catch {
-      case e: Exception =>
-        Left(
-          DataReadError(
-            rawPath,
-            s"Failed to read backfill input: ${e.getMessage}",
-            Some(e)
-          )
-        )
-    }
-  }
-
   /** Resolve the default mapping for the selected join key, validate its
     * targets, and rename in one projection so chains and swaps stay intact.
     */
@@ -966,7 +895,7 @@ object MilvusBackfill {
         if (!columnSet.contains("pk")) {
           return Left(
             SchemaValidationError(
-              "Backfill parquet must contain a 'pk' column (or supply --column-mapping to rename the PK column)"
+              "Backfill parquet must contain a 'pk' column (or supply columnMapping to rename the PK column)"
             )
           )
         }
@@ -974,7 +903,7 @@ object MilvusBackfill {
           return Left(
             SchemaValidationError(
               s"Backfill parquet contains both a 'pk' column and a column named '$joinFieldName' " +
-                "(the collection's primary-key field). Remove one, or supply --column-mapping to disambiguate."
+                "(the collection's primary-key field). Remove one, or supply columnMapping to disambiguate."
             )
           )
         }
@@ -986,7 +915,7 @@ object MilvusBackfill {
           return Left(
             SchemaValidationError(
               s"Backfill parquet must contain the physical join-key column " +
-                s"'$joinFieldName' (or supply --column-mapping to rename the input key)"
+                s"'$joinFieldName' (or supply columnMapping to rename the input key)"
             )
           )
         }

@@ -27,22 +27,22 @@ Five production modules, with dependencies only pointing downward.
 | 1 | `native-runtime`, `native-storage` | Component-aware platform loading and upstream Storage APIs. |
 | 2 | `core` | V3 formats, read computation, storage access and shared V3 writing primitives; no Spark. |
 | 3 | `spark` | Read DataSource V2, neutral physical scan contracts and Spark/Arrow conversion. |
-| 3 | `backfill` | Optional offline backfill, input bindings, result JSON and API/CLI; depends on spark/core. |
+| 3 | `backfill` | Optional offline backfill from a caller's DataFrame and its result JSON; depends on spark/core. |
 
 Layer-1 modules live in `native/runtime` and `native/storage`; `native/build`
 produces the Storage-only platform bundle. The root aggregates production modules
 and publishes no artifact. `integration` is outside the aggregate. Backfill
-builds on Spark 4.0 and 4.2 with Scala 2.13; Iceberg publishes no Spark 4.2
-runtime, so the 4.2 build refuses Iceberg input. Reader sources support Spark
-3.5 (Scala 2.12 or 2.13), 4.0, 4.1 and 4.2. `-DsparkVersion` and
+builds on Spark 4.0 and 4.2 with Scala 2.13 and reads no input itself: callers
+pass a DataFrame, and the module has no command-line entry point. Reader
+sources support Spark 3.5 (Scala 2.12 or 2.13), 4.0, 4.1 and 4.2. `-DsparkVersion` and
 `-DscalaVersion` select a profile at sbt startup. Restart sbt and clean module
 outputs when switching profiles. Formatting and package checks inspect every
-retained shim and Iceberg variant root.
+retained shim root.
 
 Initialize the `milvus-proto` and `milvus-storage` submodules before building.
 Only common/schema protobufs are generated; no service protocol is generated.
 Use `spark/assembly` for a reader bundle and the optional backfill artifact for
-computation. Keep Iceberg out of the reader's dependency closure.
+computation. Keep Iceberg and input formats out of both closures.
 
 ## Rules any change has to satisfy
 

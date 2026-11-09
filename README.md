@@ -22,11 +22,11 @@ source when testing it. Earlier 2.0 binaries do not implement this module layout
 | 1 | `native-storage` | Pinned milvus-storage JNI and upstream JVM APIs |
 | 2 | `core` | V3 snapshots, schema, filters, reads and shared V3 file-writing primitives |
 | 3 | `spark` | Read DataSource V2, neutral segment scan contract and Arrow conversion |
-| 3 | `backfill` | Optional offline computation, input bindings and result API/CLI |
+| 3 | `backfill` | Optional offline backfill of an existing snapshot from a DataFrame |
 | — | `integration` | Explicit object-storage integration tests, outside the root aggregate |
 
 Dependencies point downwards. `backfill` depends on `spark` and `core`; the reader
-does not depend on backfill or Iceberg. The public native bundle contains Storage.
+does not depend on backfill. The public native bundle contains Storage.
 An embedding application can provide one complete native bundle satisfying the
 bindings' component requirements; it must not overlay bundles for one platform.
 
@@ -37,8 +37,7 @@ bindings' component requirements; it must not overlay bundles for one platform.
 | `4.1` | 4.1.1 | 2.13.16 | 17 |
 | `4.2` | 4.2.0 | 2.13.16 | 17 |
 
-Backfill supports Spark 4.0 and 4.2 with Scala 2.13. Iceberg input is
-unavailable on 4.2, for which Iceberg publishes no runtime. Build with Java 21.
+Backfill supports Spark 4.0 and 4.2 with Scala 2.13. Build with Java 21.
 Spark 3.5 Arrow tests use Java 17 through `SPARK35_TEST_JAVA_HOME`. Reader thin
 candidates cover the source matrix; fat distribution consumers cover 4.0/4.2.
 
@@ -76,17 +75,18 @@ val rows = spark.read.format("milvus").options(snapshotOptions).load()
 rows.where("category = 1").select("id", "vector").show()
 ```
 
-Storage credentials are supplied independently of input Parquet or Iceberg
-credentials. Keep snapshot metadata, manifests, data and deletes available for
-every action. See the [reference](docs/reference.md) for canonical options.
+Storage credentials are supplied through these options, independently of any
+other source the application reads. Keep snapshot metadata, manifests, data and
+deletes available for every action. See the [reference](docs/reference.md) for
+canonical options.
 
 ## Offline backfill
 
-Backfill receives a fixed V3 snapshot and a DataFrame, Parquet path or pinned
-Iceberg snapshot (Spark 4.0 only). It validates fields and join keys, preserves
-physical row positions, applies the selected merge policy, writes segment column
-files and exports result JSON. It does not update a running Milvus collection by
-itself.
+Backfill receives a fixed V3 snapshot and a DataFrame of input rows that the
+caller reads with its own source and identity. It validates fields and join
+keys, preserves physical row positions, applies the selected merge policy,
+writes segment column files and exports result JSON. It has no command-line
+entry point and does not update a running Milvus collection by itself.
 
 The `legacy` output protocol produces manifests; `manifest-delta-v1` produces
 column-file operations for a compatible receiver to commit. This protocol choice

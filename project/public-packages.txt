@@ -30,4 +30,3 @@ spark com.zilliz.spark.connector.table
 spark com.zilliz.spark.connector.types
 spark com.zilliz.spark.connector.write
 backfill com.zilliz.spark.connector.backfill
-backfill com.zilliz.spark.connector.input

@@ -15,9 +15,8 @@ only the upstream repository can enter publication jobs.
 | Native platform | Storage JNI and its dependency closure | Linux x86_64/aarch64; macOS aarch64 |
 
 All thin modules use one immutable candidate version. The backfill artifacts are
-`com.zilliz:spark-milvus-backfill-<line>_2.13:<version>` for lines 4.0 and 4.2;
-the 4.2 artifact refuses Iceberg input, as Iceberg publishes no Spark 4.2
-runtime. Shared artifacts exported
+`com.zilliz:spark-milvus-backfill-<line>_2.13:<version>` for lines 4.0 and 4.2.
+Shared artifacts exported
 by several products or Spark profiles must have identical POM metadata and
 bytes for a given Maven coordinate. Product metadata explicitly distinguishes
 reader and backfill closures. The root project publishes nothing.
@@ -87,7 +86,7 @@ for the new graph.
 Pull requests run formatting, boundary checks, five source/Scala profiles,
 unit tests, script tests and Helm contracts. Full validation builds all three
 native platforms, executes real V3 reads and Arrow/Connect checks, and runs
-backfill on isolated object storage with independent source/target credentials.
+backfill on isolated object storage under a prefix-scoped target identity.
 Backfill must write output that can be read back; a mocked manifest is not
 runtime evidence.
 

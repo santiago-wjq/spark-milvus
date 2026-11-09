@@ -166,35 +166,6 @@ class BackfillModeTest
     MilvusBackfill.ApplyDeletesToSnapshotRows shouldBe false
   }
 
-  test("parseArgs accepts --mode coalesce") {
-    val parsed = BackfillApp.parseArgs(
-      Array(
-        "--parquet",
-        "/x",
-        "--snapshot",
-        "/y",
-        "--s3-endpoint",
-        "m:9000",
-        "--s3-bucket",
-        "b",
-        "--s3-access-key",
-        "ak",
-        "--s3-secret-key",
-        "sk",
-        "--mode",
-        "coalesce"
-      )
-    )
-    parsed("mode") shouldBe "coalesce"
-  }
-
-  test("parseArgs rejects typo'd --modes") {
-    val ex = intercept[IllegalArgumentException] {
-      BackfillApp.parseArgs(Array("--modes", "coalesce"))
-    }
-    ex.getMessage should include("Unknown argument")
-  }
-
   private def snapshotField(
       name: String,
       id: Long,

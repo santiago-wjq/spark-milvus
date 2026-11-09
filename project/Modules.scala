@@ -121,36 +121,6 @@ object Modules {
     )
   }
 
-  /** Backfill's Iceberg input compiles from `scala-iceberg` where the line has
-    * an Iceberg runtime and from `scala-no-iceberg`, which refuses Iceberg
-    * input, where it has none. Formatting covers both roots.
-    */
-  def backfillSources(line: Versions.SparkLine): Seq[Setting[_]] = {
-    import org.scalafmt.sbt.ScalafmtPlugin.autoImport._
-    val roots = Seq("scala-iceberg", "scala-no-iceberg")
-    val selected =
-      if (line.backfill.exists(_.iceberg.isDefined)) "scala-iceberg"
-      else "scala-no-iceberg"
-    Seq(Compile, Test).flatMap { configuration =>
-      Seq(
-        configuration / unmanagedSourceDirectories +=
-          (configuration / sourceDirectory).value / selected,
-        // scalafmt reads its source list separately from its directory list.
-        configuration / scalafmt / unmanagedSources := {
-          val directory = (configuration / sourceDirectory).value
-          ((configuration / unmanagedSources).value ++
-            roots.flatMap(root =>
-              ((directory / root) ** "*.scala").get
-            )).distinct
-        },
-        configuration / scalafmt / unmanagedSourceDirectories ++= {
-          val directory = (configuration / sourceDirectory).value
-          roots.map(root => directory / root)
-        }
-      )
-    }
-  }
-
   /** Keep standalone core's Jackson family aligned. The Spark module relies on
     * its distribution's own Jackson set and excludes it from bundles.
     */
@@ -164,8 +134,8 @@ object Modules {
     )
   )
 
-  /** Backfill calculations consume inputs and snapshots without service
-    * clients.
+  /** Backfill calculations consume caller DataFrames and snapshots without
+    * service clients.
     */
   val backfillBoundary: Seq[Setting[_]] = Seq(
     Compile / compile := {
