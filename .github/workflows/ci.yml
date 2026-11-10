@@ -211,12 +211,23 @@ jobs:
     name: Docker Git ownership regression
     runs-on: ubuntu-latest
     container: ubuntu:22.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
+      # The container reaches the Ubuntu archive directly. An update that stalls
+      # or meets an index in mid-sync fails only its own attempt, so each one is
+      # bounded and retried before the job gives up.
       - name: Install the image's Git version and Python
         run: |
-          apt-get update -qq
-          apt-get install -y -qq --no-install-recommends ca-certificates git python3
+          for attempt in 1 2 3; do
+            if timeout 150 apt-get update -qq; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep 30
+          done
+          apt-get install -y -qq -o Acquire::Retries=3 --no-install-recommends ca-certificates git python3
           dpkg-query -W git
 
       - uses: actions/checkout@v5
