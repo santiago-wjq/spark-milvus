@@ -8,6 +8,11 @@ import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.schema.FieldMetadata
 import com.zilliz.milvus.storage.snapshot.{
   CollectionIndex,
+  DeleteFiles,
+  Segment,
+  SegmentIndex,
+  SegmentIndexes,
+  SegmentLayout,
   Snapshot,
   SnapshotOrigin
 }
@@ -128,13 +133,70 @@ class ColumnReplacePlanTest extends AnyFunSuite with Matchers {
     refusal(input(column("embedding"))) should include(
       "'embedding' (index 'embedding_idx')"
     )
-    refusal(input(column("score")), snapshot(indexes = None)) should include(
-      "does not describe its indexes"
-    )
     ColumnReplaceTables
       .resolveTargets(input(column("embedding")), snapshot(Some(Vector.empty)))
       .fieldNames
       .toSeq shouldBe Seq("embedding")
+  }
+
+  test("absent index definitions mean none only where every segment says so") {
+    def segment(id: Long, indexes: SegmentIndexes) = Segment(
+      id = id,
+      partitionId = 20L,
+      storageVersion = 3,
+      rows = Some(4L),
+      layout = SegmentLayout.Manifest(s"base/$id", 1L),
+      deletes = DeleteFiles.InManifest,
+      indexes = indexes
+    )
+    val built = SegmentIndex(
+      collectionId = 10L,
+      partitionId = 20L,
+      segmentId = 31L,
+      fieldId = 102L,
+      indexId = 1L,
+      buildId = 7L,
+      name = "embedding_idx",
+      parameters = Map.empty,
+      filePaths = Vector("index_files/1/7/0"),
+      rowCount = 4L,
+      serializedSize = 1L,
+      indexVersion = 1L,
+      currentIndexVersion = None,
+      indexStorePathVersion = None
+    )
+    def at(segments: Segment*) =
+      snapshot(indexes = None).copy(segments = segments)
+    // Milvus omits an empty definition list; described segments decide.
+    ColumnReplaceTables
+      .resolveTargets(
+        input(column("embedding")),
+        at(segment(30L, SegmentIndexes.Unindexed))
+      )
+      .fieldNames
+      .toSeq shouldBe Seq("embedding")
+    refusal(
+      input(column("score")),
+      at(
+        segment(30L, SegmentIndexes.Unindexed),
+        segment(31L, SegmentIndexes.Unknown)
+      )
+    ) should include(
+      "describes neither its index definitions nor the index files of segment(s) 31"
+    )
+    refusal(
+      input(column("embedding")),
+      at(segment(31L, SegmentIndexes.Available(Vector(built))))
+    ) should include(
+      "'embedding' (index 'embedding_idx' built on its segments)"
+    )
+    ColumnReplaceTables
+      .resolveTargets(
+        input(column("score")),
+        at(segment(31L, SegmentIndexes.Available(Vector(built))))
+      )
+      .fieldNames
+      .toSeq shouldBe Seq("score")
   }
 
   test("tasks find the row identity and each replaced column by name") {

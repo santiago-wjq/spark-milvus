@@ -42,7 +42,12 @@ import org.apache.spark.sql.SparkSession
 import com.zilliz.milvus.storage.credential.StorageProperties
 import com.zilliz.milvus.storage.io.NativeWritableObjectStore
 import com.zilliz.milvus.storage.schema.{FieldMetadata, SchemaMapper}
-import com.zilliz.milvus.storage.snapshot.{SegmentLayout, Snapshot}
+import com.zilliz.milvus.storage.snapshot.{
+  CollectionIndex,
+  SegmentIndexes,
+  SegmentLayout,
+  Snapshot
+}
 import com.zilliz.milvus.storage.write.{
   ManifestTransaction,
   WriterResources,
@@ -289,17 +294,24 @@ private[connector] object ColumnReplaceTables {
         s"These columns cannot be replaced: ${refused.mkString(", ")}"
       )
     }
-    val indexes = snapshot.indexes.getOrElse(
-      throw new IllegalArgumentException(
-        s"Snapshot '${snapshot.name}' does not describe its indexes, so a column replacement " +
-          "cannot confirm that the replaced fields have none"
-      )
-    )
     val indexed = resolved.fields.toSeq.flatMap { column =>
       val id = column.metadata.getLong(FieldMetadata.MilvusFieldIdMetadataKey)
-      indexes
+      val defined = indexes(snapshot)
         .filter(_.fieldId == id)
         .map(index => s"'${column.name}' (index '${index.name}')")
+      val built = snapshot.dataSegments.flatMap(_.indexes match {
+        case SegmentIndexes.Available(present) =>
+          present.filter(_.fieldId == id)
+        case _ => Vector.empty
+      })
+      if (defined.nonEmpty) defined
+      else
+        built
+          .map(_.name)
+          .distinct
+          .map(name =>
+            s"'${column.name}' (index '$name' built on its segments)"
+          )
     }
     if (indexed.nonEmpty) {
       throw new IllegalArgumentException(
@@ -310,6 +322,26 @@ private[connector] object ColumnReplaceTables {
     }
     resolved
   }
+
+  /** The snapshot's index definitions. Milvus writes the snapshot without an
+    * empty list, so absent definitions mean none only where every data segment
+    * also says which index files it has: a segment whose record cannot say
+    * leaves an index on a replaced field possible.
+    */
+  private def indexes(snapshot: Snapshot): Vector[CollectionIndex] =
+    snapshot.indexes.getOrElse {
+      val unknown = snapshot.dataSegments.collect {
+        case segment if segment.indexes == SegmentIndexes.Unknown => segment.id
+      }
+      if (unknown.nonEmpty) {
+        throw new IllegalArgumentException(
+          s"Snapshot '${snapshot.name}' describes neither its index definitions nor the index files of " +
+            s"segment(s) ${unknown.sorted.take(10).mkString(", ")}, so a column replacement cannot confirm " +
+            "that the replaced fields have none"
+        )
+      }
+      Vector.empty
+    }
 
   private def plannedSegments(snapshot: Snapshot): Seq[PlannedSegment] = {
     val planned = snapshot.dataSegments.map { segment =>

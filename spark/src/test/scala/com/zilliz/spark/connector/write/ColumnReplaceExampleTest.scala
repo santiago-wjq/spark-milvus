@@ -224,7 +224,8 @@ class ColumnReplaceExampleTest extends AnyFunSuite with BeforeAndAfterAll {
     }
 
   /** Writes the example's segments, their snapshot Avro records and the
-    * snapshot file at `place`.
+    * snapshot file at `place`. Like Milvus, the file omits the empty index
+    * list; the segment records say that no index files exist.
     */
   private def prepare(place: Place): Place = {
     val schema = WriteSchema.resolve(
@@ -282,8 +283,7 @@ class ColumnReplaceExampleTest extends AnyFunSuite with BeforeAndAfterAll {
           {"fieldID": 101, "name": "score", "data_type": "Int64", "nullable": true},
           {"fieldID": 102, "name": "embedding", "data_type": "FloatVector",
            "type_params": [{"key": "dim", "value": "2"}]}]}},
-        "format_version": 4,
-        "indexes": []
+        "format_version": 4
       }"""
       )
       .asInstanceOf[ObjectNode]
