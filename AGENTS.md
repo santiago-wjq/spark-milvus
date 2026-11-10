@@ -8,11 +8,14 @@ to build, test and change the code.
 
 ## What this project is
 
-Spark reads fixed Milvus Storage V3 snapshots directly from object storage.
-The optional backfill module joins caller-supplied input with an existing snapshot
-and writes replacement column files and result JSON. The caller owns snapshot
-preparation, protection, service submission and online visibility. Public code has
-no Milvus service client, vector search engine or index construction API.
+Spark reads fixed Milvus Storage V3 snapshots directly from object storage
+and replaces stored columns of such a snapshot from a DataFrame: a physical
+read carries each row's identity, and the write commits new manifest revisions
+and a receipt without registering them anywhere. The optional backfill module
+joins caller-supplied input with an existing snapshot and writes replacement
+column files and result JSON. The caller owns snapshot preparation, protection,
+service submission and online visibility. Public code has no Milvus service
+client, vector search engine or index construction API.
 
 The 1.x line stopped at tag `v1.6.0` and is no longer maintained. Current work
 replaces the earlier read/search distribution. Development versions use the 2.1
@@ -26,7 +29,7 @@ Five production modules, with dependencies only pointing downward.
 |---|---|---|
 | 1 | `native-runtime`, `native-storage` | Component-aware platform loading and upstream Storage APIs. |
 | 2 | `core` | V3 formats, read computation, storage access and shared V3 writing primitives; no Spark. |
-| 3 | `spark` | Read DataSource V2, neutral physical scan contracts and Spark/Arrow conversion. |
+| 3 | `spark` | Read and column-replacement DataSource V2, neutral physical scan contracts and Spark/Arrow conversion. |
 | 3 | `backfill` | Optional offline backfill from a caller's DataFrame and its result JSON; depends on spark/core. |
 
 Layer-1 modules live in `native/runtime` and `native/storage`; `native/build`

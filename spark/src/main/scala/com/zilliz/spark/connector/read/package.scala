@@ -5,6 +5,8 @@ package com.zilliz.spark.connector
   * pruning. SegmentScan exposes immutable segment metadata and planned
   * partitions to downstream consumers without owning their computation.
   * ColumnBinding maps logical fields onto physical columns; row and columnar
-  * readers share the same read and exclusion contracts.
+  * readers share the same read and exclusion contracts. MetadataColumns
+  * synthesizes the position columns, among them the `_milvus_row_id` of a
+  * physical read, from the planned snapshot id, segment and row offset.
   */
 package object read

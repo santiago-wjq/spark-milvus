@@ -209,6 +209,8 @@ fails during planning.
 | `MilvusOption.ReaderFieldIDs` (`fieldIDs`) | String | No | unset | Comma-separated numeric field IDs, applied during both schema inference and table creation. Each requested ID must exist in the snapshot schema; Spark projection can further prune this set. With an external `.schema()`, its non-metadata fields must select exactly these IDs and their names and Spark types must match the snapshot. |
 | `MilvusOption.MilvusExtraColumns` (`milvus.extra.columns`) | String | No | "" | Comma-separated metadata columns. The supported names are `_segment_id`, `_row_offset`, and `_timestamp`; see [Output schema](#output-schema). |
 | `MilvusOption.MilvusFilter` (`milvus.filter`) | String | No | unset | Milvus scalar expression for an ordinary table read. It is parsed and validated against the fixed snapshot during planning, evaluated in both row and columnar readers, and combined with Spark predicates and deletes before Limit. |
+| `MilvusOption.ReadMode` (`milvus.read.mode`) | String | No | unset | What a load reads. Unset reads the collection's live rows. `physical` reads every stored row, rows marked deleted included, which is what a [column replacement](column-replacement.md) must write back; it cannot be combined with `milvus.read.apply.deletes=true`. `write_result` reads the receipt a column replacement published at the load path instead of collection data. |
+| `MilvusOption.ReadIncludeRowId` (`milvus.read.include_row_id`) | Boolean | No | false | Adds `_milvus_row_id` to a `physical` read; see [Output schema](#output-schema). The snapshot must carry a positive `snapshot_info.id`. |
 | `MilvusOption.ReadApplyDeletes` (`milvus.read.apply.deletes`) | Boolean | No | true | Apply all segment-local and applicable L0 deletes visible in the fixed snapshot. L0 deletes apply within the same source channel and partition; partition `-1` covers all partitions of that channel. Setting this to `false` is explicit opt-out; any provided value besides `true` or `false`, including a blank value, is rejected. |
 | `milvus.read.vector.raw` | Boolean | No | false | Output type for vector columns. With the default `false`, vectors are converted to native Spark types (`FloatVector`/`Float16Vector`/`BFloat16Vector` to `ArrayType(FloatType)`, `Int8Vector` to `ArrayType(ShortType)`, `SparseFloatVector` to `MapType(LongType, FloatType)`). Set to `true` and vector columns come out as `BinaryType`, the bytes exactly as stored, for the caller to decode using `dim` and the element type. That path does no per-element conversion, which suits batch jobs that hand the bytes straight to a native library |
 | `milvus.read.columnar` | Boolean | No | true | How the scan delivers rows. With the default `true` Spark gets whole Arrow batches (`ColumnarBatch`) that wrap the native buffers without copying, with vector columns typed as `milvus.read.vector.raw` decides; a batch with deleted rows is delivered through a position map over the surviving rows, still without copying. `false` delivers one row at a time. Row and columnar readers use the same expected-row guard. |
@@ -218,7 +220,8 @@ fails during planning.
 
 Provided selector lists reject blanks, empty entries and non-numeric values.
 Boolean read options (`milvus.snapshot.mode`, `milvus.read.apply.deletes`,
-`milvus.read.vector.raw`, `milvus.read.columnar`) accept only `true` or `false`,
+`milvus.read.include_row_id`, `milvus.read.vector.raw`, `milvus.read.columnar`)
+accept only `true` or `false`,
 case-insensitively. Positive integer/long options reject blanks, zero, negative,
 non-decimal and overflowing values, reporting the key and supplied value.
 
@@ -280,6 +283,11 @@ The output schema for `milvus` format depends on the Milvus collection schema an
     segment before delete filtering.
   - `_timestamp` (`LongType`, snapshot nullability): the stored Milvus system
     timestamp field with field ID `1`; it is read from storage, not synthesized.
+- `_milvus_row_id` (non-null struct of `snapshot_id`, `segment_id` and
+  `row_offset`, all `LongType`) last, when `milvus.read.include_row_id=true`
+  asks for it. It binds the row to the snapshot it was read from and to its
+  stored position, and a [column replacement](column-replacement.md) consumes
+  it. Callers carry it unchanged and do not interpret its fields.
 
 The connector does not expose a `partition` metadata column. Partition and
 segment selection uses `milvus.partitions` and `milvus.segments`.

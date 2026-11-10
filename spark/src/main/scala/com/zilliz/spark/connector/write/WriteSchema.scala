@@ -93,11 +93,21 @@ object WriteSchema {
           s"its fields are ${collection.fields.map(_.name).mkString(", ")}"
       )
     }
+    // A new row has to be routed to the partition its key hashes to, which
+    // the connector does not do. Replacing other columns of stored rows keeps
+    // every row where it is, so only the key column itself is refused.
     collection.fields.find(_.isPartitionKey).foreach { key =>
-      throw new IllegalArgumentException(
-        s"Collection '${collection.name}' has partition key '${key.name}'; " +
-          "writing to a partition-key collection is not supported"
-      )
+      if (mode == Mode.Append) {
+        throw new IllegalArgumentException(
+          s"Collection '${collection.name}' has partition key '${key.name}'; " +
+            "writing to a partition-key collection is not supported"
+        )
+      }
+      if (dataFrame.fieldNames.contains(key.name)) {
+        throw new IllegalArgumentException(
+          s"Column '${key.name}' is the partition key of collection '${collection.name}' and cannot be replaced"
+        )
+      }
     }
     val fields = dataFrame.fields.map { column =>
       val field = byName(column.name)

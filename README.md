@@ -1,8 +1,9 @@
 # Milvus Spark Connector
 
 Read fixed Milvus Storage V3 snapshots directly from object storage with Apache
-Spark. The optional backfill module joins an existing snapshot with supplied
-input and writes new column files plus a result JSON document.
+Spark, and replace stored columns of such a snapshot from a DataFrame. The
+optional backfill module joins an existing snapshot with supplied input and
+writes new column files plus a result JSON document.
 
 Callers supply and protect the snapshot. The connector does not create snapshots,
 call Milvus, submit backfill results, or confirm online visibility. Vector search,
@@ -21,7 +22,7 @@ source when testing it. Earlier 2.0 binaries do not implement this module layout
 | 1 | `native-runtime` | Validate component requirements and extract one platform bundle |
 | 1 | `native-storage` | Pinned milvus-storage JNI and upstream JVM APIs |
 | 2 | `core` | V3 snapshots, schema, filters, reads and shared V3 file-writing primitives |
-| 3 | `spark` | Read DataSource V2, neutral segment scan contract and Arrow conversion |
+| 3 | `spark` | Read and column-replacement DataSource V2, neutral segment scan contract and Arrow conversion |
 | 3 | `backfill` | Optional offline backfill of an existing snapshot from a DataFrame |
 | — | `integration` | Explicit object-storage integration tests, outside the root aggregate |
 
@@ -80,6 +81,16 @@ other source the application reads. Keep snapshot metadata, manifests, data and
 deletes available for every action. See the [reference](docs/reference.md) for
 canonical options.
 
+## Replacing columns
+
+A physical read returns every stored row of a snapshot with its row identity.
+The caller computes final values with ordinary Spark code and writes them back
+with `milvus.write.operation=replace_columns` and `mode("append")`; the
+connector restores stored order, writes new column files and commits a new
+manifest revision per segment, then publishes a receipt at the `.save()` path.
+Registering the new revisions with Milvus stays with the caller. Read
+[the column replacement guide](docs/column-replacement.md).
+
 ## Offline backfill
 
 Backfill receives a fixed V3 snapshot and a DataFrame of input rows that the
@@ -98,6 +109,7 @@ Read [the backfill guide](docs/backfill.md) for input and completion boundaries.
 | Document | Contents |
 |---|---|
 | [Reference](docs/reference.md) | Read options and supported data types |
+| [Column replacement](docs/column-replacement.md) | Physical reads, row identities, the column write and its receipt |
 | [Backfill](docs/backfill.md) | Offline input, computation and output contracts |
 | [Examples](demo/README.md) | Python/Java snapshot reads and SQL |
 | [Container](docker/README.md) | Build and run the reader image |

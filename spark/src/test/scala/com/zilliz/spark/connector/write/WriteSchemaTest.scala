@@ -189,4 +189,20 @@ class WriteSchemaTest extends AnyFunSuite with Matchers {
     )
     e.getMessage should include("partition key 'name'")
   }
+
+  test("replacing columns of a partition-key collection keeps the key column") {
+    val keyed = collection.copy(fields = collection.fields.map {
+      case f if f.name == "name" => f.copy(isPartitionKey = true)
+      case f                     => f
+    })
+    val others = StructType(whole.fields.filterNot(_.name == "name"))
+    WriteSchema
+      .resolve(others, keyed, WriteSchema.Mode.Columns)
+      .fieldNames
+      .toSeq shouldBe others.fieldNames.toSeq
+    val e = intercept[IllegalArgumentException](
+      WriteSchema.resolve(whole, keyed, WriteSchema.Mode.Columns)
+    )
+    e.getMessage should include("partition key of collection")
+  }
 }

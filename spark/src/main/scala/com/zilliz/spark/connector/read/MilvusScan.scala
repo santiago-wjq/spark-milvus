@@ -312,7 +312,15 @@ class MilvusScan(
       schema,
       MilvusPartitionReaderFactory.readerOptions(options.asScala.toMap),
       pushedExpression,
-      pushedLimit
+      pushedLimit,
+      snapshotId =
+        if (milvusOption.extraColumns.contains(MilvusOption.MilvusRowIdColumn))
+          snapshot.id.getOrElse(
+            throw new IllegalStateException(
+              s"snapshot ${snapshot.name} has no id for '${MilvusOption.MilvusRowIdColumn}'"
+            )
+          )
+        else 0L
     )
 }
 
