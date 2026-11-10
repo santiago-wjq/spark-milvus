@@ -28,12 +28,6 @@ FIXTURES = (
     "core/src/test/scala/com/zilliz/milvus/storage/io/ReadFixtures.scala",
 )
 MAIN = "com.zilliz.spark.connector.read.ReadOnlyConsumerSmoke"
-BACKFILL_MAIN = "com.zilliz.spark.connector.backfill.BackfillConsumerSmoke"
-BACKFILL_FIXTURES = ("backfill/src/test/scala/com/zilliz/spark/connector/backfill/BackfillConsumerSmoke.scala",)
-BACKFILL_CHECKS = ("independent-executor", "backfill-v3-consumer", "backfill-result-json", "backfill-offline-boundary")
-# The Spark lines the backfill module is built for. Its consumer backfills from an
-# in-memory DataFrame, and every line runs all of these checks.
-BACKFILL_LINES = ("4.0", "4.2")
 FIXTURE_ROOT = ROOT / "core/src/test/resources/read-fixtures"
 FIXTURE_GROUPS = ("collections/nearest",)
 REQUIRED_CHECKS = (
@@ -134,23 +128,14 @@ def main_jars(manifest):
     }
 
 
-def backfill_entry(line):
-    return f"spark-milvus-backfill-{line}_2.13"
-
-
 def expected_artifacts(manifest, line, platform, entry):
-    if entry in ("thin", "backfill"):
-        if entry == "backfill" and line not in BACKFILL_LINES:
-            raise ValueError("Backfill consumer supports only Spark " + " and ".join(BACKFILL_LINES))
+    if entry == "thin":
         # Every line's thin module resolves the same shared modules below it.
         entry_id = f"spark-milvus-{line}-thin_2.13"
         names = {
             "spark-milvus-native-runtime",
             "spark-milvus-native-storage_2.13", "spark-milvus-core_2.13", entry_id,
         }
-        if entry == "backfill":
-            entry_id = backfill_entry(line)
-            names.add(entry_id)
         available = main_jars(manifest)
         missing = names - available.keys()
         if missing:
@@ -287,12 +272,11 @@ def collect_diagnostics(spark_home, work, output, previous_apps):
 
 
 def compile_fixture(work, repository, version, row, entry_id, env):
-    backfill = entry_id in {backfill_entry(line) for line in BACKFILL_LINES}
     project = work / "fixture"
     (project / "project").mkdir(parents=True)
     sources = project / "src/main/scala"
     sources.mkdir(parents=True)
-    for relative in (BACKFILL_FIXTURES if backfill else FIXTURES):
+    for relative in FIXTURES:
         shutil.copyfile(ROOT / relative, sources / Path(relative).name)
     resources = fixture_resources()
     for relative in resources:
@@ -318,7 +302,7 @@ def compile_fixture(work, repository, version, row, entry_id, env):
         cwd=project, env={**env, "COURSIER_CACHE": str(work / "compile-coursier")},
     )
     jar = project / "target/scala-2.13/smoke.jar"
-    verify_fixture_jar(jar, resources, (BACKFILL_MAIN.replace(".", "/"),) if backfill else FIXTURE_CLASSES)
+    verify_fixture_jar(jar, resources, FIXTURE_CLASSES)
     return jar
 
 
@@ -356,8 +340,8 @@ def smoke(candidate, line, platform, output, *, central=False, entry=None, nativ
         entries = ("universal", "platform")
         if f"spark-milvus-{line}-thin_2.13" in main_jars(manifest):
             entries += ("thin",)
-    if native_bundle is not None and entries not in (("thin",), ("backfill",)):
-        raise ValueError("--native-bundle requires --entry thin/backfill or a thin-only candidate")
+    if native_bundle is not None and entries != ("thin",):
+        raise ValueError("--native-bundle requires --entry thin or a thin-only candidate")
     # Platform -> (sys.platform, uname machine) of a matching consumer host.
     if platform not in HOSTS or (sys.platform, os.uname().machine) != HOSTS[platform]:
         raise ValueError("Consumer runner does not match " + platform)
@@ -401,7 +385,7 @@ def smoke(candidate, line, platform, output, *, central=False, entry=None, nativ
             work = root / entry
             work.mkdir()
             entry_id, expected = expected_artifacts(manifest, line, platform, entry)
-            native = thin_native_bundle(candidate, manifest, platform, native_bundle) if entry in ("thin", "backfill") else None
+            native = thin_native_bundle(candidate, manifest, platform, native_bundle) if entry == "thin" else None
             native_digest = digest(native) if native else None
             fixture = compile_fixture(work, repository, version, row, entry_id, env)
             ivy = work / "runtime-ivy"
@@ -434,15 +418,13 @@ def smoke(candidate, line, platform, output, *, central=False, entry=None, nativ
             ]
             if native:
                 command += ["--jars", str(native)]
-            command += ["--class", BACKFILL_MAIN if entry == "backfill" else MAIN, str(fixture)]
-            if entry == "backfill":
-                command.append(str(FIXTURE_ROOT / "collections/nearest"))
+            command += ["--class", MAIN, str(fixture)]
             try:
                 run(command, cwd=work, env={**env, **launch}, log=log)
             finally:
                 collect_diagnostics(spark_home, work, diagnostics, previous_apps)
             text = log.read_text()
-            checks = completed_checks(text, BACKFILL_CHECKS if entry == "backfill" else REQUIRED_CHECKS)
+            checks = completed_checks(text, REQUIRED_CHECKS)
             resolved = check_resolved(ivy, expected)
             report = {"entry": entry_id, "resolved": resolved, "result": "passed", **checks}
             if native:
@@ -464,7 +446,7 @@ def main():
     parser.add_argument("--platform", choices=sorted(HOSTS), required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--central", action="store_true", help="Resolve from public Maven Central")
-    parser.add_argument("--entry", choices=("universal", "platform", "thin", "backfill"), help="Consume one delivery form")
+    parser.add_argument("--entry", choices=("universal", "platform", "thin"), help="Consume one delivery form")
     parser.add_argument("--native-bundle", type=Path, help="Separate OSS platform JAR for a thin-only candidate")
     args = parser.parse_args()
     smoke(args.candidate.resolve(), args.line, args.platform, args.output.resolve(),

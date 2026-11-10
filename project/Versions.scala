@@ -19,11 +19,7 @@ object Versions {
         * Netty 4.1.118 fails at the first buffer.
         */
       hadoop: String,
-      netty: String,
-      /** Whether the optional backfill module builds on this line, with Scala
-        * 2.13 only.
-        */
-      backfill: Boolean = false
+      netty: String
   )
 
   /** Compile against the compatibility floor, with the Arrow version that Spark
@@ -48,8 +44,7 @@ object Versions {
       "17",
       Seq(scala213),
       hadoop = "3.4.1",
-      netty = "4.1.118.Final",
-      backfill = true
+      netty = "4.1.118.Final"
     ),
     SparkLine(
       "4.1",
@@ -69,8 +64,7 @@ object Versions {
       "17",
       Seq(scala213),
       hadoop = "3.5.0",
-      netty = "4.2.13.Final",
-      backfill = true
+      netty = "4.2.13.Final"
     )
   )
 
@@ -98,13 +92,6 @@ object Versions {
     )
     requested
   }
-
-  /** The lines the optional backfill module builds on. */
-  val backfillLines: Seq[SparkLine] = lines.filter(_.backfill)
-
-  /** Whether backfill builds on the selected line and Scala version. */
-  val selectedBackfill: Boolean =
-    selected.backfill && selectedScala.startsWith("2.13.")
 
   /** Shared modules must remain loadable on the 3.5 line's Java baseline. */
   val sharedJavaRelease = "11"

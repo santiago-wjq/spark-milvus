@@ -1,8 +1,8 @@
 # Connector reference
 
-The reader consumes fixed Storage V3 snapshots without service calls. Backfill is
-an optional module for Spark 4.0 and 4.2 documented in
-[backfill.md](backfill.md). The reader supports the Spark/Scala combinations in
+The reader consumes fixed Storage V3 snapshots without service calls; the
+[column replacement](column-replacement.md) writes new columns of such a
+snapshot back from a DataFrame. Both support the Spark/Scala combinations in
 [README](../README.md#project-structure).
 Use a verified candidate from this source; the previous 2.0 delivery has a
 different capability and native-component contract.

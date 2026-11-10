@@ -24,11 +24,7 @@ lazy val compileAndRuntime = "compile->compile;runtime->runtime"
 // The root is an aggregate only. Select one Spark line per sbt invocation.
 lazy val root = project
   .in(file("."))
-  .aggregate(
-    (Seq[ProjectReference](nativeRuntime, nativeStorage, core, spark) ++
-      (if (Versions.selectedBackfill) Seq[ProjectReference](backfill)
-       else Seq.empty)): _*
-  )
+  .aggregate(nativeRuntime, nativeStorage, core, spark)
   .settings(
     name := "spark-milvus",
     ReadValidation.matrixSettings,
@@ -243,75 +239,6 @@ lazy val spark = Project("spark", file("spark"))
     else connectClient(Versions.selected)
   )
   .settings(lineBundle(Versions.selected))
-
-// Optional offline backfill of an existing snapshot from a caller's DataFrame.
-// The reader graph remains independent of this module. The caller reads its
-// input with its own format and identity; backfill depends on neither an input
-// format nor Iceberg.
-lazy val BackfillNativeTest = config("nativeTest") extend Test
-lazy val backfill = Project("backfill", file("backfill"))
-  .dependsOn(
-    spark % s"$compileAndRuntime;test->test",
-    core % s"$compileAndRuntime;test->test"
-  )
-  .configs(BackfillNativeTest)
-  .settings(inConfig(BackfillNativeTest)(Defaults.testSettings))
-  .settings(
-    inConfig(BackfillNativeTest)(
-      org.scalafmt.sbt.ScalafmtPlugin.scalafmtConfigSettings
-    )
-  )
-  .settings(
-    name := "backfill",
-    moduleName := s"spark-milvus-backfill-${Versions.selected.id}",
-    Modules.perLine(Versions.selected),
-    ThinArtifacts.settings("backfill", Versions.selected.javaRelease),
-    publish / skip := true,
-    libraryDependencies ++= Dependencies.sparkDeps(Versions.selected) ++ Seq(
-      scalaTest % Test
-    ),
-    dependencyOverrides ++= Dependencies.lineOverrides(Versions.selected),
-    inConfig(Test)(Modules.nativeTest),
-    inConfig(BackfillNativeTest)(Modules.nativeTest),
-    BackfillNativeTest / testOptions += Tests.Argument(
-      TestFrameworks.ScalaTest,
-      "-u",
-      (target.value / "native-test-reports").getAbsolutePath
-    ),
-    assembly / assemblyJarName := s"spark-milvus-backfill-${Versions.selected.id}_${scalaBinaryVersion.value}-${version.value}.jar",
-    Modules.backfillBoundary,
-    BackfillNativeTest / dependencyClasspath ++= (Test / fullClasspath).value,
-    BackfillNativeTest / unmanagedResourceDirectories += (core / Test / resourceDirectory).value,
-    Compile / compile := {
-      require(
-        Versions.selectedBackfill,
-        s"Backfill supports Spark ${Versions.backfillLines.map(_.id).mkString(" and ")} " +
-          s"with Scala 2.13 only, not Spark ${Versions.selected.id} with Scala ${Versions.selectedScala}"
-      )
-      (Compile / compile).value
-    },
-    releaseThinArtifacts / aggregate := false,
-    releaseThinArtifacts := ThinArtifacts.export(
-      (ThisBuild / baseDirectory).value,
-      Versions.selected,
-      scalaVersion.value,
-      scalaBinaryVersion.value,
-      Seq(
-        (nativeRuntime / thinModule).value,
-        (nativeStorage / thinModule).value,
-        (core / thinModule).value,
-        (spark / thinModule).value,
-        thinModule.value
-      ),
-      (Compile / fullClasspath).value ++ (Runtime / managedClasspath).value ++ (spark / Compile / fullClasspath).value,
-      javaHome.value.getOrElse(file(sys.props("java.home"))),
-      streams.value.log
-    )
-  )
-  .settings(lineBundle(Versions.selected))
-  .settings(
-    assembly / assemblyJarName := s"spark-milvus-backfill-${Versions.selected.id}_${scalaBinaryVersion.value}-${version.value}.jar"
-  )
 
 // Spark Connect on the 4.x lines. The suite runs the server in its own JVM,
 // beside the classic session, and starts the client as a JVM of its own: the
@@ -536,7 +463,7 @@ lazy val fatJarRules: Seq[Setting[_]] = Seq(
 ThisBuild / organizationName := "zilliz"
 ThisBuild / organizationHomepage := Some(url("https://zilliz.com/"))
 ThisBuild / description :=
-  "Read and backfill Milvus V3 snapshots directly from Apache Spark."
+  "Read Milvus V3 snapshots and replace their columns directly from Apache Spark."
 
 ThisBuild / licenses := List(
   "Server Side Public License v1" -> URI

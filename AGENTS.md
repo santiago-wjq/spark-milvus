@@ -11,11 +11,10 @@ to build, test and change the code.
 Spark reads fixed Milvus Storage V3 snapshots directly from object storage
 and replaces stored columns of such a snapshot from a DataFrame: a physical
 read carries each row's identity, and the write commits new manifest revisions
-and a receipt without registering them anywhere. The optional backfill module
-joins caller-supplied input with an existing snapshot and writes replacement
-column files and result JSON. The caller owns snapshot preparation, protection,
-service submission and online visibility. Public code has no Milvus service
-client, vector search engine or index construction API.
+and a receipt without registering them anywhere. The caller computes the new
+values, and owns snapshot preparation, protection, service submission and
+online visibility. Public code has no Milvus service client, vector search
+engine, index construction API or join of caller input with a snapshot.
 
 The 1.x line stopped at tag `v1.6.0` and is no longer maintained. Current work
 replaces the earlier read/search distribution. Development versions use the 2.1
@@ -23,29 +22,28 @@ line; candidate selection is explicit and must never reuse published coordinates
 
 ## The public layers
 
-Five production modules, with dependencies only pointing downward.
+Four production modules, with dependencies only pointing downward.
 
 | Layer | Modules | What lives there |
 |---|---|---|
 | 1 | `native-runtime`, `native-storage` | Component-aware platform loading and upstream Storage APIs. |
 | 2 | `core` | V3 formats, read computation, storage access and shared V3 writing primitives; no Spark. |
 | 3 | `spark` | Read and column-replacement DataSource V2, neutral physical scan contracts and Spark/Arrow conversion. |
-| 3 | `backfill` | Optional offline backfill from a caller's DataFrame and its result JSON; depends on spark/core. |
 
 Layer-1 modules live in `native/runtime` and `native/storage`; `native/build`
 produces the Storage-only platform bundle. The root aggregates production modules
-and publishes no artifact. `integration` is outside the aggregate. Backfill
-builds on Spark 4.0 and 4.2 with Scala 2.13 and reads no input itself: callers
-pass a DataFrame, and the module has no command-line entry point. Reader
-sources support Spark 3.5 (Scala 2.12 or 2.13), 4.0, 4.1 and 4.2. `-DsparkVersion` and
+and publishes no artifact. `integration` is outside the aggregate. The column
+replacement reads no input itself: callers pass a DataFrame, and there is no
+command-line entry point. Sources support Spark 3.5 (Scala 2.12 or 2.13), 4.0,
+4.1 and 4.2. `-DsparkVersion` and
 `-DscalaVersion` select a profile at sbt startup. Restart sbt and clean module
 outputs when switching profiles. Formatting and package checks inspect every
 retained shim root.
 
 Initialize the `milvus-proto` and `milvus-storage` submodules before building.
 Only common/schema protobufs are generated; no service protocol is generated.
-Use `spark/assembly` for a reader bundle and the optional backfill artifact for
-computation. Keep Iceberg and input formats out of both closures.
+Use `spark/assembly` for a bundle. Keep Iceberg and input formats out of its
+closure.
 
 ## Rules any change has to satisfy
 

@@ -404,8 +404,9 @@ kubectl auth can-i deletecollection configmaps -n spark-demo \
 
 Then run the read example with the real options file and confirm that executor
 tasks read and validate the snapshot. The [demo walkthrough](../demo/README.md)
-provides these checks. Backfill additionally needs write access to its declared
-output location; see [offline backfill](backfill.md).
+provides these checks. A column replacement additionally needs write access to
+the snapshot's segment directories and to its write result address; see
+[column replacement](column-replacement.md).
 
 | Symptom | Check first |
 |---|---|

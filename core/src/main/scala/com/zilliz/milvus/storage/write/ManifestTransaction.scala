@@ -21,9 +21,9 @@ object ManifestTransaction {
   /** New files of existing columns: an append to the segment. */
   case object AppendFiles extends Change
 
-  /** Backfill: the groups replace `columns` (manifest column names, which are
-    * Milvus field ids). Each column is dropped and the new groups added in the
-    * same transaction, so the swap is atomic per column.
+  /** Column replacement: the groups replace `columns` (manifest column names,
+    * which are Milvus field ids). Each column is dropped and the new groups
+    * added in the same transaction, so the swap is atomic per column.
     */
   final case class ReplaceColumns(columns: Seq[String]) extends Change
 

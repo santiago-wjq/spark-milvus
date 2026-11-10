@@ -1,12 +1,13 @@
 # Milvus Spark Connector
 
 Read fixed Milvus Storage V3 snapshots directly from object storage with Apache
-Spark, and replace stored columns of such a snapshot from a DataFrame. The
-optional backfill module joins an existing snapshot with supplied input and
-writes new column files plus a result JSON document.
+Spark, and replace stored columns of such a snapshot from a DataFrame: the
+connector writes new column files, commits new manifest revisions and publishes
+a receipt.
 
-Callers supply and protect the snapshot. The connector does not create snapshots,
-call Milvus, submit backfill results, or confirm online visibility. Vector search,
+Callers supply and protect the snapshot and compute the new values. The
+connector does not create snapshots, call Milvus, register new revisions, or
+confirm online visibility. Vector search,
 index construction, append, backup and legacy storage compatibility are outside
 this repository. Vector fields remain supported as ordinary data columns.
 
@@ -23,11 +24,9 @@ source when testing it. Earlier 2.0 binaries do not implement this module layout
 | 1 | `native-storage` | Pinned milvus-storage JNI and upstream JVM APIs |
 | 2 | `core` | V3 snapshots, schema, filters, reads and shared V3 file-writing primitives |
 | 3 | `spark` | Read and column-replacement DataSource V2, neutral segment scan contract and Arrow conversion |
-| 3 | `backfill` | Optional offline backfill of an existing snapshot from a DataFrame |
 | — | `integration` | Explicit object-storage integration tests, outside the root aggregate |
 
-Dependencies point downwards. `backfill` depends on `spark` and `core`; the reader
-does not depend on backfill. The public native bundle contains Storage.
+Dependencies point downwards. The public native bundle contains Storage.
 An embedding application can provide one complete native bundle satisfying the
 bindings' component requirements; it must not overlay bundles for one platform.
 
@@ -38,8 +37,8 @@ bindings' component requirements; it must not overlay bundles for one platform.
 | `4.1` | 4.1.1 | 2.13.16 | 17 |
 | `4.2` | 4.2.0 | 2.13.16 | 17 |
 
-Backfill supports Spark 4.0 and 4.2 with Scala 2.13. Build with Java 21.
-Spark 3.5 Arrow tests use Java 17 through `SPARK35_TEST_JAVA_HOME`. Reader thin
+Build with Java 21. Spark 3.5 Arrow tests use Java 17 through
+`SPARK35_TEST_JAVA_HOME`. Reader thin
 candidates cover the source matrix; fat distribution consumers cover 4.0/4.2.
 
 ## Building
@@ -91,26 +90,12 @@ manifest revision per segment, then publishes a receipt at the `.save()` path.
 Registering the new revisions with Milvus stays with the caller. Read
 [the column replacement guide](docs/column-replacement.md).
 
-## Offline backfill
-
-Backfill receives a fixed V3 snapshot and a DataFrame of input rows that the
-caller reads with its own source and identity. It validates fields and join
-keys, preserves physical row positions, applies the selected merge policy,
-writes segment column files and exports result JSON. It has no command-line
-entry point and does not update a running Milvus collection by itself.
-
-The `legacy` output protocol produces manifests; `manifest-delta-v1` produces
-column-file operations for a compatible receiver to commit. This protocol choice
-is independent of storage version. The public V3 entry rejects V2 inputs.
-Read [the backfill guide](docs/backfill.md) for input and completion boundaries.
-
 ## Documents
 
 | Document | Contents |
 |---|---|
 | [Reference](docs/reference.md) | Read options and supported data types |
 | [Column replacement](docs/column-replacement.md) | Physical reads, row identities, the column write and its receipt |
-| [Backfill](docs/backfill.md) | Offline input, computation and output contracts |
 | [Examples](demo/README.md) | Python/Java snapshot reads and SQL |
 | [Container](docker/README.md) | Build and run the reader image |
 | [Cluster setup](docs/cluster-setup.md) | Runtime, identities and networking |

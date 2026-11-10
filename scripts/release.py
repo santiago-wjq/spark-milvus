@@ -42,10 +42,6 @@ for _line in (ROOT / "project/public-packages.txt").read_text().splitlines():
         PUBLIC_PACKAGES.setdefault(_module, set()).add(_package.replace(".", "/"))
 
 
-# The Spark lines the optional backfill module builds on, Scala 2.13 only.
-BACKFILL_LINES = ("4.0", "4.2")
-
-
 VERSION = re.compile(r"2\.\d+\.\d+(?:-(?:(?:alpha|beta|rc)\.\d+(?:\.\d+)*|central-test\.\d+))?")
 SHA = re.compile(r"[0-9a-f]{40}")
 
@@ -57,12 +53,7 @@ def thin_graph(line, binary, product):
         f"spark-milvus-core_{binary}": ("core", (f"spark-milvus-native-storage_{binary}",)),
         f"spark-milvus-{line}-thin_{binary}": ("spark", (f"spark-milvus-core_{binary}",)),
     }
-    require(product in {"reader", "backfill"}, "Unknown thin product")
-    if product == "backfill":
-        require(line in BACKFILL_LINES and binary == "2.13",
-                "Backfill supports Spark " + " and ".join(BACKFILL_LINES) + " / Scala 2.13")
-        graph[f"spark-milvus-backfill-{line}_{binary}"] = (
-            "backfill", (f"spark-milvus-{line}-thin_{binary}", f"spark-milvus-core_{binary}"))
+    require(product == "reader", "Unknown thin product")
     return graph
 
 
@@ -75,7 +66,7 @@ def thin_inventory(plan):
     for row in plan["thin"]:
         line, binary, product = thin_selection(row)
         for artifact, (project, dependencies) in thin_graph(line, binary, product).items():
-            value = (project, dependencies, line if project in {"spark", "backfill"} else None)
+            value = (project, dependencies, line if project == "spark" else None)
             require(artifact not in result or result[artifact] == value, "Conflicting thin module identity")
             result[artifact] = value
     return result
@@ -89,7 +80,6 @@ THIN_SOURCES = {
                        "milvus-storage/scala/io/milvus/storage/MilvusStorageReader.scala"},
     "core": {"com/zilliz/milvus/storage/snapshot/Snapshot.scala"},
     "spark": {"com/zilliz/spark/connector/sources/MilvusDataSource.scala"},
-    "backfill": {"com/zilliz/spark/connector/backfill/MilvusBackfill.scala"},
 }
 ET.register_namespace("", "http://maven.apache.org/POM/4.0.0")
 
@@ -213,11 +203,6 @@ def create_plan(version, output, matrix, thin_only=False):
     sources = exported.get("spark", [])
     require(len(sources) == 5, "Build matrix must retain all five Spark/Scala source combinations")
     plan["thin"] = [dict(row, product="reader") for row in sources]
-    backfill = [row for row in sources if row["line"] in BACKFILL_LINES
-                and row["scala"].startswith("2.13.")]
-    require(sorted(row["line"] for row in backfill) == sorted(BACKFILL_LINES),
-            "Build matrix must retain one Scala 2.13 combination for each backfill line")
-    plan["thin"].extend(dict(row, product="backfill") for row in backfill)
     plan["version"] = version
     if thin_only:
         plan["distribution"] = "thin"
@@ -496,7 +481,7 @@ def verify_thin_pom(artifact, dependencies, module, plan, spark_build_version):
         expected = {(dep["groupId"], dep["artifactId"], dep["version"]) for dep in declared}
         require(actual == expected and len(declared) == len(expected),
                 f"Thin POM dependencies differ from build metadata: {artifact} ({scope})")
-    if thin_inventory(plan)[artifact][0] in {"spark", "backfill"}:
+    if thin_inventory(plan)[artifact][0] == "spark":
         spark = {dep["artifactId"]: dep for dep in dependencies if dep["groupId"] == "org.apache.spark"}
         binary = artifact.rsplit("_", 1)[1]
         require(set(spark) >= {f"spark-core_{binary}", f"spark-sql_{binary}", f"spark-catalyst_{binary}"},

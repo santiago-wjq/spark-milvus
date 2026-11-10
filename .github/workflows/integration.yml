@@ -77,14 +77,6 @@ jobs:
         run: |
           python3 scripts/ci/consumer_smoke.py --candidate candidate \
             --line "$SPARK_LINE" --platform "$NATIVE_PLATFORM" --output consumer-results
-      # Every consumer line, 4.0 and 4.2, also builds backfill.
-      - name: Consume the independent backfill artifact and read its output
-        env:
-          SPARK_LINE: ${{ matrix.line }}
-          NATIVE_PLATFORM: ${{ matrix.platform }}
-        run: |
-          python3 scripts/ci/consumer_smoke.py --candidate candidate \
-            --line "$SPARK_LINE" --platform "$NATIVE_PLATFORM" --entry backfill --output backfill-consumer-results
       - name: Preserve consumer evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -92,6 +84,5 @@ jobs:
           name: consumer-${{ matrix.platform }}-${{ matrix.os_version }}-${{ matrix.line }}
           path: |
             consumer-results/
-            backfill-consumer-results/
           if-no-files-found: warn
           retention-days: 14

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the exported source matrix and require actual read and backfill test reports."""
+"""Run the exported source matrix and require actual read and column write test reports."""
 
 import argparse
 import hashlib
@@ -27,12 +27,16 @@ CORE_SUITES = (
 )
 RUNTIME_SUITE = "com.zilliz.milvus.jni.runtime.NativeLibrariesTest"
 INTEGRATION_SUITE = "com.zilliz.spark.connector.sources.MilvusDataSourceTest"
-BACKFILL_SUITES = ("com.zilliz.spark.connector.backfill.BackfillNativeTest",)
-# The Spark lines the backfill module builds on, Scala 2.13 only.
-BACKFILL_LINES = ("4.0", "4.2")
+COLUMN_WRITE_SUITES = (
+    "com.zilliz.spark.connector.write.ColumnReplaceNativeTest",
+    "com.zilliz.spark.connector.write.ColumnReplaceExampleTest",
+)
+# The prefix-scoped object store that scripts/ci/input_storage.py provisions.
+OBJECT_STORE_VARIABLES = ("STORAGE_TEST_S3_ENDPOINT", "STORAGE_TEST_S3_BUCKET",
+                          "STORAGE_TEST_S3_TARGET_ACCESS_KEY", "STORAGE_TEST_S3_TARGET_SECRET_KEY")
 
 MODULE_CLEAN = [project + "/clean" for project in
-                ("native-runtime", "native-storage", "core", "spark", "backfill", "integration")]
+                ("native-runtime", "native-storage", "core", "spark", "integration")]
 # The layer-1 project IDs keep their published names; their directories sit under native/.
 PROJECT_DIRECTORIES = {"native-runtime": "native/runtime", "native-storage": "native/storage"}
 
@@ -285,22 +289,23 @@ def integration_checks(bundle):
     save_report("object-storage", {"xmlSuites": xml_evidence(reports), "execution": counts})
 
 
-def backfill_checks(matrix, line, bundle):
+def column_write_checks(matrix, line, scala, bundle):
+    """Column replacement on real V3 files: local storage and the prefix-scoped
+    object store, whose cases cancel without it, so none may be canceled."""
     if not bundle:
-        raise ValueError("Backfill native validation requires --native-bundle")
-    if line not in BACKFILL_LINES:
-        raise ValueError("Backfill builds only on Spark " + " and ".join(BACKFILL_LINES))
-    rows = [row for row in matrix["spark"] if row["line"] == line and row["scalaBinary"] == "2.13"]
-    if len(rows) != 1:
-        raise ValueError("Unsupported matrix selection")
-    row = rows[0]
-    name = "backfill-native-" + line + "-" + row["scala"]
-    directory = ROOT / "backfill/target/native-test-reports"
-    shutil.rmtree(directory, ignore_errors=True)
-    log = run_sbt(name, ["backfill/NativeTest/test"], bundle=bundle,
-                  environment=signal_environment(), line=line, scala=row["scala"])
-    reports = check_reports(directory, BACKFILL_SUITES)
-    counts = check_execution(log, [("backfill", reports)])["backfill"]
+        raise ValueError("Column write validation requires --native-bundle")
+    missing = [name for name in OBJECT_STORE_VARIABLES if not os.environ.get(name)]
+    if missing:
+        raise ValueError("Column write validation requires the object store from "
+                         "scripts/ci/input_storage.py; missing " + ", ".join(missing))
+    row = selected(matrix, "spark", scala, line)
+    project = row["project"]
+    name = "column-write-" + line + "-" + scala
+    reset_reports((project,))
+    log = run_sbt(name, [project + "/Test/testOnly " + " ".join(COLUMN_WRITE_SUITES)], bundle=bundle,
+                  environment=signal_environment(), line=line, scala=scala)
+    reports = check_reports(report_directory(project), COLUMN_WRITE_SUITES)
+    counts = check_execution(log, [(project, reports)])[project]
     save_report(name, {"selection": row, "xmlSuites": xml_evidence(reports), "execution": counts})
 
 
@@ -349,7 +354,7 @@ def clean_contract(name, projects, records, before):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("matrix", "shared", "spark", "integration", "backfill"))
+    parser.add_argument("action", choices=("matrix", "shared", "spark", "integration", "column-write"))
     parser.add_argument("--matrix", type=Path, required=True)
     parser.add_argument("--scala")
     parser.add_argument("--line")
@@ -367,8 +372,8 @@ def main():
         shared_checks(matrix, args.scala, args.native_bundle)
     elif args.action == "spark":
         spark_checks(matrix, args.line, args.scala, args.native_bundle)
-    elif args.action == "backfill":
-        backfill_checks(matrix, args.line, args.native_bundle)
+    elif args.action == "column-write":
+        column_write_checks(matrix, args.line, args.scala, args.native_bundle)
     else:
         integration_checks(args.native_bundle)
 

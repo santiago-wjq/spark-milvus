@@ -325,38 +325,34 @@ class MatrixTest(unittest.TestCase):
                     self.run_source_check(lambda: validation.spark_checks(matrix, "3.5", "2.12.20", None),
                                           **options)
 
-    def test_backfill_native_check_runs_each_backfill_line_with_its_matrix_scala(self):
-        matrix = copy.deepcopy(self.matrix)
-        matrix["spark"].append({"line": "4.2", "scala": "2.13.16", "scalaBinary": "2.13",
-                                "spark": "4.2.0", "project": "spark"})
+    def test_column_write_check_runs_its_suites_with_the_object_store(self):
         root = Path(self.temporary.name)
         bundle = root / "bundle.jar"
-        for line in ("4.0", "4.2"):
-            with self.subTest(line=line), \
-                    mock.patch.object(validation, "ROOT", root), \
-                    mock.patch.object(validation, "run_sbt", return_value="log") as run, \
-                    mock.patch.object(validation, "signal_environment", return_value={}), \
-                    mock.patch.object(validation, "check_reports", return_value={}) as reports, \
-                    mock.patch.object(validation, "check_execution", return_value={"backfill": {}}), \
-                    mock.patch.object(validation, "save_report") as saved:
-                validation.backfill_checks(matrix, line, bundle)
-                name = "backfill-native-" + line + "-2.13.16"
-                self.assertEqual(run.call_args.args, (name, ["backfill/NativeTest/test"]))
-                self.assertEqual((run.call_args.kwargs["line"], run.call_args.kwargs["scala"]),
-                                 (line, "2.13.16"))
-                self.assertEqual(run.call_args.kwargs["bundle"], bundle)
-                self.assertEqual(reports.call_args.args[1], validation.BACKFILL_SUITES)
-                self.assertEqual(saved.call_args.args[0], name)
-                self.assertEqual(saved.call_args.args[1]["selection"]["line"], line)
-        for line in ("3.5", "4.1", None):
-            with self.subTest(line=line), \
-                    self.assertRaisesRegex(ValueError, "^Backfill builds only on Spark 4.0 and 4.2$"):
-                validation.backfill_checks(matrix, line, bundle)
-        matrix["spark"] = [row for row in matrix["spark"] if row["line"] != "4.2"]
-        with self.assertRaisesRegex(ValueError, "Unsupported matrix selection"):
-            validation.backfill_checks(matrix, "4.2", bundle)
-        with self.assertRaisesRegex(ValueError, "requires --native-bundle"):
-            validation.backfill_checks(matrix, "4.0", None)
+        store = {name: "value" for name in validation.OBJECT_STORE_VARIABLES}
+        with mock.patch.dict(os.environ, store), \
+                mock.patch.object(validation, "ROOT", root), \
+                mock.patch.object(validation, "run_sbt", return_value="log") as run, \
+                mock.patch.object(validation, "signal_environment", return_value={}), \
+                mock.patch.object(validation, "check_reports", return_value={}) as reports, \
+                mock.patch.object(validation, "check_execution", return_value={"spark": {}}) as execution, \
+                mock.patch.object(validation, "save_report") as saved:
+            validation.column_write_checks(self.matrix, "4.0", "2.13.16", bundle)
+        name = "column-write-4.0-2.13.16"
+        self.assertEqual(run.call_args.args,
+                         (name, ["spark/Test/testOnly " + " ".join(validation.COLUMN_WRITE_SUITES)]))
+        self.assertEqual((run.call_args.kwargs["line"], run.call_args.kwargs["scala"]), ("4.0", "2.13.16"))
+        self.assertEqual(run.call_args.kwargs["bundle"], bundle)
+        self.assertEqual(reports.call_args.args[1], validation.COLUMN_WRITE_SUITES)
+        # Object-store cases cancel without the store, so cancellations fail.
+        self.assertNotIn("allow_skipped", execution.call_args.kwargs)
+        self.assertEqual(saved.call_args.args[0], name)
+        for missing in validation.OBJECT_STORE_VARIABLES:
+            partial = {key: value for key, value in store.items() if key != missing}
+            with self.subTest(missing=missing), mock.patch.dict(os.environ, partial, clear=True), \
+                    self.assertRaisesRegex(ValueError, "missing " + missing):
+                validation.column_write_checks(self.matrix, "4.0", "2.13.16", bundle)
+        with mock.patch.dict(os.environ, store), self.assertRaisesRegex(ValueError, "requires --native-bundle"):
+            validation.column_write_checks(self.matrix, "4.0", "2.13.16", None)
 
     def test_native_checks_leave_cleaning_to_the_source_jobs(self):
         matrix = self.source_matrix()

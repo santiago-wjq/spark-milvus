@@ -64,7 +64,7 @@ class ColumnGroupSplitTest extends AnyFunSuite with Matchers {
   }
 
   test(
-    "columns written without any key field, as backfill does, get only the per-field groups"
+    "columns written without any key field, as a column replacement does, get only the per-field groups"
   ) {
     ColumnGroupSplit.milvusPatterns(Seq(vector, age)) shouldBe Seq("^102$")
     ColumnGroupSplit.milvusPatterns(Seq(age)) shouldBe Seq.empty

@@ -1,7 +1,7 @@
 # Working in this repository
 
-The connector reads fixed Storage V3 snapshots and optionally computes offline
-backfill. Callers own snapshot preparation and service submission. See [README](../README.md).
+The connector reads fixed Storage V3 snapshots and replaces their stored columns
+from a DataFrame. Callers own snapshot preparation and service submission. See [README](../README.md).
 
 ## Development container
 
@@ -12,14 +12,13 @@ module `target` directories. Native compilation uses the host architecture.
 
 ## Project ids and version selection
 
-Production projects are `native-runtime`, `native-storage`, `core`, `spark` and
-`backfill`. The first two live under `native/`. `integration` stays outside the
-root aggregate. Backfill supports Spark 4.0 and 4.2 with Scala 2.13. Reader
-profiles support 3.5 (Scala 2.12/2.13), 4.0, 4.1 and 4.2.
+Production projects are `native-runtime`, `native-storage`, `core` and `spark`.
+The first two live under `native/`. `integration` stays outside the root
+aggregate. Profiles support 3.5 (Scala 2.12/2.13), 4.0, 4.1 and 4.2.
 
 ```bash
-sbt core/test spark/compile backfill/compile
-sbt -DsparkVersion=4.2 -DscalaVersion=2.13.16 'clean; integration/clean; spark/compile; spark/test; backfill/test'
+sbt core/test spark/compile
+sbt -DsparkVersion=4.2 -DscalaVersion=2.13.16 'clean; integration/clean; spark/compile; spark/test'
 sbt -DsparkVersion=3.5 -DscalaVersion=2.12.20 'clean; integration/clean; spark/compile; spark/test'
 ```
 
@@ -54,8 +53,8 @@ Follow the [sbt skill](../.agents/skills/spark-milvus-sbt/SKILL.md).
 `build.sbt` owns module wiring and exports; `project/Versions.scala` owns profiles;
 `Dependencies.scala` owns dependency declarations; `Modules.scala` enforces
 layering and tests. `NativeBundle.scala` validates component requirements and
-platform bundles. `ThinArtifacts.scala` exports reader and optional backfill
-closures; `ReleaseArtifacts.scala` exports the reader JVM distribution.
+platform bundles. `ThinArtifacts.scala` exports the reader closure;
+`ReleaseArtifacts.scala` exports the reader JVM distribution.
 
 ## Fixed inputs for read tests
 
@@ -73,8 +72,9 @@ python3 scripts/ci/check_read_fixtures.py
 Run on JDK 21. Spark 3.5 Arrow tests fork Java 17 supplied by
 `SPARK35_TEST_JAVA_HOME`. Native-dependent ordinary read tests may cancel when no
 bundle is available; report successful, failed, canceled and aborted counts.
-A green ordinary test run is not native acceptance. Explicit backfill native tests
-fail when their required bundle or object-store fixture is absent.
+A green ordinary test run is not native acceptance: the column replacement's
+object-storage cases also cancel without their fixture, so the explicit
+validation below requires both and fails on any cancellation.
 
 ```bash
 python3 scripts/ci/read_storage.py start --directory /tmp/milvus-read-fixture
@@ -85,23 +85,23 @@ python3 scripts/ci/read_storage.py stop --directory /tmp/milvus-read-fixture
 
 python3 scripts/ci/input_storage.py start --env-file /tmp/milvus-input.env
 eval "$(cat /tmp/milvus-input.env)"
-sbt -Dmilvus.native.bundle=/absolute/path/to/bundle.jar backfill/NativeTest/test
+python3 scripts/ci/read_validation.py column-write --matrix build-matrix.json \
+  --line 4.0 --scala 2.13.16 --native-bundle /absolute/path/to/bundle.jar
 python3 scripts/ci/input_storage.py stop --env-file /tmp/milvus-input.env
 ```
 
-Always stop owned fixtures after failures. Backfill native acceptance exercises
-real V3 writes/readback, locally and on object storage under a target identity
-scoped to one key prefix. No Milvus service is needed. Borrowed DataFrames keep
-their caller's session, source identity and caches. Never mutate shared Hadoop
-settings to switch users.
+`build-matrix.json` is the source matrix that `sbt 'exportBuildMatrix
+build-matrix.json'` writes. Always stop owned fixtures after failures. Column
+replacement acceptance exercises real V3 writes and readback, locally and on
+object storage under an identity scoped to one key prefix. No Milvus service is
+needed. Never mutate shared Hadoop settings to switch users.
 
 ### Public read CI
 
-The source matrix covers every reader Spark/Scala combination. The default
-Spark 4.0 job also runs all backfill unit tests; the Spark 4.2 source job runs
-them on 4.2. Full validation requires native
-Storage reads, Arrow ownership, Connect, independent consumer JVMs, object-store
-identity isolation and backfill write/readback under a prefix-scoped identity.
+The source matrix covers every Spark/Scala combination. Full validation requires
+native Storage reads, Arrow ownership, Connect, independent consumer JVMs,
+object-store identity isolation and, on every combination, column replacement
+writes and readback under a prefix-scoped identity.
 Linux x86/ARM and macOS Storage coverage is retained. Search-specific gates belong outside the public build.
 
 ## Building the native library
@@ -160,7 +160,6 @@ and its check with Java 21 from the repository root:
 
 ```bash
 sbt 'set Global / concurrentRestrictions += Tags.limitAll(1)' scalafmtAll scalafmtCheckAll
-sbt backfill/NativeTest/scalafmt backfill/NativeTest/scalafmtCheck
 git diff --check
 ```
 

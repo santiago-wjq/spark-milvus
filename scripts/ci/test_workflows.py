@@ -49,7 +49,7 @@ class WorkflowGateTest(unittest.TestCase):
         runs = [step.get("run", "") for step in aggregate["steps"]]
         # The shared modules' tests run once, in the matrix; the aggregate keeps
         # the default line's whole Spark suite.
-        self.assertIn("sbt spark/test backfill/test", runs)
+        self.assertIn("sbt spark/test", runs)
         self.assertNotIn("sbt test", runs)
         # Each source matrix job holds its own combination to the clean
         # contract, so no job recompiles the whole matrix to clean it.
@@ -69,38 +69,27 @@ class WorkflowGateTest(unittest.TestCase):
         self.assertLess(steps.index(start), steps.index(read))
         self.assertLess(steps.index(read), steps.index(stop))
 
-    def test_every_backfill_line_runs_unit_native_and_consumer_checks(self):
+    def test_every_line_replaces_columns_on_local_and_object_storage(self):
         jobs = workflow("ci.yml")["jobs"]
-        # The default line's backfill unit tests run in build-and-test; the 4.2
-        # source lane runs its own after the clean contract, before the upload.
-        steps = jobs["spark-sources"]["steps"]
-        source = next(step for step in steps if "read_validation.py spark" in step.get("run", ""))
-        unit = next(step for step in steps if "backfill/test" in step.get("run", ""))
-        upload = next(step for step in steps if step.get("uses", "").startswith("actions/upload-artifact"))
-        self.assertEqual(unit["if"], "matrix.line == '4.2'")
-        self.assertEqual(unit["env"], {"SPARK_LINE": "${{ matrix.line }}", "SCALA_VERSION": "${{ matrix.scala }}"})
-        self.assertIn('"-DsparkVersion=$SPARK_LINE" "-DscalaVersion=$SCALA_VERSION"', unit["run"])
-        self.assertIn("backfill/NativeTest/compile", unit["run"])
-        self.assertLess(steps.index(source), steps.index(unit))
-        self.assertLess(steps.index(unit), steps.index(upload))
-        lines = "matrix.line == '4.0' || matrix.line == '4.2'"
         steps = jobs["spark-native"]["steps"]
         start = next(step for step in steps if "input_storage.py start" in step.get("run", ""))
-        native = next(step for step in steps if "read_validation.py backfill" in step.get("run", ""))
+        native = next(step for step in steps if "read_validation.py column-write" in step.get("run", ""))
         stop = next(step for step in steps if "input_storage.py stop" in step.get("run", ""))
-        self.assertEqual(start["if"], lines)
-        self.assertEqual(native["if"], lines)
-        self.assertEqual(stop["if"], "always() && (" + lines + ")")
+        # The column write lives in the spark module, which every line builds.
+        self.assertNotIn("if", start)
+        self.assertNotIn("if", native)
+        self.assertEqual(stop["if"], "always()")
         self.assertIn("--line '${{ matrix.line }}'", native["run"])
+        self.assertIn("--scala '${{ matrix.scala }}'", native["run"])
         self.assertIn("--native-bundle", native["run"])
+        self.assertEqual(native["env"]["SPARK35_TEST_JAVA_HOME"], "${{ steps.test-java.outputs.path }}")
         self.assertLess(steps.index(start), steps.index(native))
         self.assertLess(steps.index(native), steps.index(stop))
-        # Every consumer line also consumes its own backfill module.
-        consumer = workflow("integration.yml")["jobs"]["consumer"]["steps"]
-        backfill = next(step for step in consumer if "--entry backfill" in step.get("run", ""))
-        self.assertNotIn("if", backfill)
-        self.assertEqual(backfill["env"]["SPARK_LINE"], "${{ matrix.line }}")
-        self.assertIn('--line "$SPARK_LINE"', backfill["run"])
+        # No workflow builds, tests or consumes a backfill module any more.
+        for name in ("ci.yml", "integration.yml", "build-artifacts.yml"):
+            for job in workflow(name)["jobs"].values():
+                for step in job.get("steps", []):
+                    self.assertNotIn("backfill", step.get("run", "").lower(), name)
 
     def test_helm_lints_the_service_free_read_mode(self):
         steps = workflow("ci.yml")["jobs"]["integration-helm"]["steps"]
@@ -428,8 +417,7 @@ class WorkflowGateTest(unittest.TestCase):
         self.assertNotIn("if", jobs["thin"])
         export = next(step for step in steps if "releaseThinArtifacts" in step.get("run", ""))
         self.assertEqual(export["env"]["RELEASE_VERSION"], "${{ inputs.version }}")
-        self.assertIn('"$project/releaseThinArtifacts"', export["run"])
-        self.assertIn('project=backfill', export["run"])
+        self.assertIn("spark/releaseThinArtifacts", export["run"])
         upload = next(step for step in steps if step.get("uses", "").startswith("actions/upload-artifact"))
         self.assertEqual(upload["with"]["path"], "target/release-thin/${{ matrix.line }}/${{ matrix.scalaBinary }}/${{ matrix.product }}/")
         self.assertEqual(upload["with"]["if-no-files-found"], "error")

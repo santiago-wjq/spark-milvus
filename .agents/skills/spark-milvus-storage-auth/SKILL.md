@@ -10,7 +10,7 @@ Read [AGENTS.md](../../../AGENTS.md).
 The connector reaches object storage through milvus-storage's C filesystem: see
 [spark-milvus-storage-access](../spark-milvus-storage-access/SKILL.md). Hadoop
 keys survive only as translation input in `HadoopStorageKeys`; Spark's own
-reads of backfill input data still go through Hadoop. This skill covers
+reads of a job's other input data still go through Hadoop. This skill covers
 that residue. A change here should not make it harder to delete.
 
 ## Before changing anything
@@ -40,7 +40,7 @@ and the commit messages behind the fix are usually explicit.
 ## Keep input and target identities independent
 
 The connector reaches object storage through milvus-storage's filesystem
-(`core.io.NativeObjectStore`); Spark's reads of backfill input data use Hadoop
+(`core.io.NativeObjectStore`); Spark's reads of a job's other input data use Hadoop
 in the same pod. Configure each side for its own bucket and identity. Do not
 copy Milvus storage credentials into the input reader or modify shared Hadoop
 configuration to switch identities. An explicitly selected provider must remain

@@ -164,18 +164,18 @@ class ColumnReplaceExampleTest extends AnyFunSuite with BeforeAndAfterAll {
       "the native libraries and a compatible Arrow JVM are required"
     )
     val settings = Seq(
-      "BACKFILL_TEST_S3_ENDPOINT",
-      "BACKFILL_TEST_S3_BUCKET",
-      "BACKFILL_TEST_S3_TARGET_ACCESS_KEY",
-      "BACKFILL_TEST_S3_TARGET_SECRET_KEY"
+      "STORAGE_TEST_S3_ENDPOINT",
+      "STORAGE_TEST_S3_BUCKET",
+      "STORAGE_TEST_S3_TARGET_ACCESS_KEY",
+      "STORAGE_TEST_S3_TARGET_SECRET_KEY"
     ).map(name => name -> sys.env.get(name).filter(_.nonEmpty))
     assume(
       settings.forall(_._2.nonEmpty),
       "an isolated object store from scripts/ci/input_storage.py is required"
     )
     val env = settings.map { case (name, value) => name -> value.get }.toMap
-    val endpoint = env("BACKFILL_TEST_S3_ENDPOINT")
-    val bucket = env("BACKFILL_TEST_S3_BUCKET")
+    val endpoint = env("STORAGE_TEST_S3_ENDPOINT")
+    val bucket = env("STORAGE_TEST_S3_BUCKET")
     val storage = StorageProperties.from(
       Map(
         StorageProperties.StorageType -> "remote",
@@ -188,10 +188,10 @@ class ColumnReplaceExampleTest extends AnyFunSuite with BeforeAndAfterAll {
         StorageProperties.Region -> "us-east-1",
         StorageProperties.UseIam -> "false",
         StorageProperties.AccessKeyId -> env(
-          "BACKFILL_TEST_S3_TARGET_ACCESS_KEY"
+          "STORAGE_TEST_S3_TARGET_ACCESS_KEY"
         ),
         StorageProperties.AccessKeyValue -> env(
-          "BACKFILL_TEST_S3_TARGET_SECRET_KEY"
+          "STORAGE_TEST_S3_TARGET_SECRET_KEY"
         )
       )
     )
@@ -212,9 +212,9 @@ class ColumnReplaceExampleTest extends AnyFunSuite with BeforeAndAfterAll {
       val bucket = place.storage(StorageProperties.BucketName)
       val hadoop = spark.sparkContext.hadoopConfiguration
       val settings = Map(
-        "endpoint" -> sys.env("BACKFILL_TEST_S3_ENDPOINT"),
-        "access.key" -> sys.env("BACKFILL_TEST_S3_TARGET_ACCESS_KEY"),
-        "secret.key" -> sys.env("BACKFILL_TEST_S3_TARGET_SECRET_KEY"),
+        "endpoint" -> sys.env("STORAGE_TEST_S3_ENDPOINT"),
+        "access.key" -> sys.env("STORAGE_TEST_S3_TARGET_ACCESS_KEY"),
+        "secret.key" -> sys.env("STORAGE_TEST_S3_TARGET_SECRET_KEY"),
         "path.style.access" -> "true",
         "endpoint.region" -> "us-east-1"
       ).map { case (key, value) => s"fs.s3a.bucket.$bucket.$key" -> value }

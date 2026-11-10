@@ -304,12 +304,9 @@ jobs:
           RELEASE_VERSION: ${{ inputs.version }}
           SPARK_LINE: ${{ matrix.line }}
           SCALA_VERSION: ${{ matrix.scala }}
-          PRODUCT: ${{ matrix.product }}
         run: |
-          project=spark
-          if [[ "$PRODUCT" == backfill ]]; then project=backfill; fi
           sbt "-DsparkVersion=$SPARK_LINE" "-DscalaVersion=$SCALA_VERSION" \
-            "-Drelease.version=$RELEASE_VERSION" "$project/releaseThinArtifacts"
+            "-Drelease.version=$RELEASE_VERSION" spark/releaseThinArtifacts
       - uses: actions/upload-artifact@v4
         with:
           name: thin-${{ matrix.line }}-${{ matrix.scala }}-${{ matrix.product }}

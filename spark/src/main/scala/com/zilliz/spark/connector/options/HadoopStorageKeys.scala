@@ -287,9 +287,9 @@ object HadoopStorageKeys extends Logging {
     )
   }
 
-  /** Whether the S3A identity Hadoop uses for `bucket` is an assumed role.
-    * Backfill decides its native writer's role with this, so it and the
-    * connector read one rule; a chain the native layer cannot express throws.
+  /** Whether the S3A identity Hadoop uses for `bucket` is an assumed role. A
+    * native writer decides its role with this, so writers and reads follow one
+    * rule; a chain the native layer cannot express throws.
     */
   private[connector] def s3aAssumesRole(
       conf: Configuration,

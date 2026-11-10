@@ -121,7 +121,7 @@ def start(env_file: Path, network_container: str | None = None) -> None:
         endpoint = (f"http://127.0.0.1:{port}" if network_container else
                     "http://" + docker("port", container, "9000/tcp").splitlines()[0])
         health_check(endpoint)
-        values = {"BACKFILL_TEST_S3_ENDPOINT": endpoint, "BACKFILL_TEST_S3_BUCKET": bucket}
+        values = {"STORAGE_TEST_S3_ENDPOINT": endpoint, "STORAGE_TEST_S3_BUCKET": bucket}
         for identity in ("source", "target"):
             access, secret = identity + secrets.token_hex(8), secrets.token_hex(24)
             policy = {"Version": "2012-10-17", "Statement": [
@@ -144,8 +144,8 @@ def start(env_file: Path, network_container: str | None = None) -> None:
                    "/tmp/input-policy.json")
             docker("exec", container, "mc", "admin", "policy", "attach", "fixture", identity,
                    "--user", access)
-            values[f"BACKFILL_TEST_S3_{identity.upper()}_ACCESS_KEY"] = access
-            values[f"BACKFILL_TEST_S3_{identity.upper()}_SECRET_KEY"] = secret
+            values[f"STORAGE_TEST_S3_{identity.upper()}_ACCESS_KEY"] = access
+            values[f"STORAGE_TEST_S3_{identity.upper()}_SECRET_KEY"] = secret
         with open(env_file, "x", opener=lambda path, flags: os.open(path, flags, 0o600)) as output:
             output.writelines(f"export {key}={shlex.quote(value)}\n" for key, value in values.items())
         if os.environ.get("GITHUB_ENV"):

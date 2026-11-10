@@ -10,7 +10,7 @@ import sbt._
 import sbt.Keys._
 
 /** Exports the existing module graph as independently consumable JVM artifacts.
-  * Reader and optional offline backfill have explicit dependency closures.
+  * The reader modules have an explicit dependency closure.
   */
 object ThinArtifacts {
   val releaseThinArtifacts = taskKey[Seq[File]](
@@ -72,14 +72,8 @@ object ThinArtifacts {
       sourceSha.matches("[a-f0-9]{40}"),
       "Thin release source must have an exact Git commit"
     )
-    val product =
-      if (modules.exists(_.projectId == "backfill")) "backfill" else "reader"
-    require(
-      product != "backfill" || (line.backfill && scalaBinary == "2.13"),
-      s"Backfill releases support Spark ${Versions.backfillLines.map(_.id).mkString(" and ")} / Scala 2.13"
-    )
-    val expected = Set("native-runtime", "native-storage", "core", "spark") ++
-      (if (product == "backfill") Set("backfill") else Set.empty[String])
+    val product = "reader"
+    val expected = Set("native-runtime", "native-storage", "core", "spark")
     require(
       modules
         .map(_.projectId)
@@ -272,7 +266,7 @@ object ThinArtifacts {
       projectId: String,
       sourceSha: String
   ): Elem = {
-    val sparkModule = projectId == "spark" || projectId == "backfill"
+    val sparkModule = projectId == "spark"
     val dependencies = (original \ "dependencies" \ "dependency")
       .collect {
         // sbt writes `provided,test` dependencies as test in makePom. Retain
@@ -396,9 +390,7 @@ object ThinArtifacts {
       case "core" =>
         "Milvus V3 schemas, storage formats and read/write primitives."
       case "spark" =>
-        "Spark snapshot DataSource and Arrow write interfaces."
-      case "backfill" =>
-        "Offline field backfill of existing snapshots from a DataFrame."
+        "Spark snapshot DataSource, column replacement write and Arrow interfaces."
       case other => sys.error(s"Unknown thin module: $other")
     }
     s"Spark Milvus thin module. $purpose"

@@ -74,8 +74,8 @@ object WriteSchema {
       */
     case object Append extends Mode
 
-    /** Only the columns given (backfill): each must be a collection field,
-      * nothing has to be complete.
+    /** Only the columns given (column replacement): each must be a collection
+      * field, nothing has to be complete.
       */
     case object Columns extends Mode
   }

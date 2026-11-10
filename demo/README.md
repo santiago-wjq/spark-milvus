@@ -54,11 +54,12 @@ not connector runtime APIs, and never create a snapshot. Pass `--help` for
 URI, database, collection, snapshot, storage-options and output arguments.
 The reader examples take the returned path and storage configuration directly.
 
-## Offline backfill
+## Replacing columns
 
-The optional backfill module is described in [offline backfill](../docs/backfill.md).
-Its result is stored segment output and metadata; applying that result to a
-running Milvus service is outside these examples.
+Replacing stored columns from a DataFrame is described in
+[column replacement](../docs/column-replacement.md). Its result is new segment
+revisions and a receipt; registering them with a running Milvus service is
+outside these examples.
 
 The [image guide](../docker/README.md) and
 [demo Helm chart](../deploy/helm/spark-milvus-demo/README.md) package the reader

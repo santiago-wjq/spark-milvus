@@ -10,16 +10,12 @@ only the upstream repository can enter publication jobs.
 | Product | Modules | Profiles |
 |---|---|---|
 | Reader thin | native-runtime, native-storage, core, spark | Spark 3.5 with Scala 2.12/2.13; 4.0, 4.1, 4.2 with Scala 2.13 |
-| Backfill thin | Reader closure plus backfill | Spark 4.0 and 4.2 / Scala 2.13 |
 | Reader bundled JVM | JVM dependency closure, without platform libraries | Spark 4.0 and 4.2 / Scala 2.13 |
 | Native platform | Storage JNI and its dependency closure | Linux x86_64/aarch64; macOS aarch64 |
 
-All thin modules use one immutable candidate version. The backfill artifacts are
-`com.zilliz:spark-milvus-backfill-<line>_2.13:<version>` for lines 4.0 and 4.2.
-Shared artifacts exported
-by several products or Spark profiles must have identical POM metadata and
-bytes for a given Maven coordinate. Product metadata explicitly distinguishes
-reader and backfill closures. The root project publishes nothing.
+All thin modules use one immutable candidate version. Shared artifacts exported
+by several Spark profiles must have identical POM metadata and bytes for a given
+Maven coordinate. The root project publishes nothing.
 
 A native bundle has `format.version=2` and `components=storage` under
 `native/milvus/2/<platform>/manifest.properties`. Binding modules contribute
@@ -65,7 +61,7 @@ and checksum validation before reuse.
 
 Export JVM artifacts with the selected Spark/Scala profile and
 `-Drelease.version=<version>`. `spark/releaseThinArtifacts` exports the reader
-closure; `backfill/releaseThinArtifacts` exports the optional backfill closure.
+closure.
 The build workflow records each export in
 `target/release-thin/<spark-line>/<scala-binary>/<product>/thin-artifacts.json`.
 Restart sbt and clean module outputs when changing profiles. Pass the collected
@@ -85,15 +81,14 @@ for the new graph.
 
 Pull requests run formatting, boundary checks, five source/Scala profiles,
 unit tests, script tests and Helm contracts. Full validation builds all three
-native platforms, executes real V3 reads and Arrow/Connect checks, and runs
-backfill on isolated object storage under a prefix-scoped target identity.
-Backfill must write output that can be read back; a mocked manifest is not
-runtime evidence.
+native platforms, executes real V3 reads and Arrow/Connect checks, and replaces
+columns on every Spark/Scala combination, locally and on isolated object storage
+under a prefix-scoped identity. The write must commit revisions that read back;
+a mocked manifest is not runtime evidence.
 
 Candidate consumers resolve the selected artifacts in isolated projects and
 run with independent executors. Reader consumers assert fixed V3 rows,
-projection, deletes, empty results and repeated actions. The backfill consumer
-runs on every consumer line with that line's separate product closure. Linux
+projection, deletes, empty results and repeated actions. Linux
 image jobs run the exact reader assembly. Search correctness, native search
 tests and CPU portability belong to the repository that owns search.
 

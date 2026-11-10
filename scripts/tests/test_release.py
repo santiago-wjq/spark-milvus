@@ -36,7 +36,7 @@ class ReleaseTest(unittest.TestCase):
         self.output = self.root / "candidate"
         self.plan = json.loads(release.MATRIX.read_text())
         self.plan["jvm"] = RELEASE_ROWS
-        self.plan["thin"] = [{"line": "4.0", "scala": "2.13.16", "spark": "4.0.0", "product": "backfill"}]
+        self.plan["thin"] = [{"line": "4.0", "scala": "2.13.16", "spark": "4.0.0", "product": "reader"}]
         self.build_matrix = self.root / "build-matrix.json"
         release.write_json(self.build_matrix, {"schemaVersion": 1, "release": RELEASE_ROWS, "spark": [
             {"line": line, "scala": scala, "spark": line + ".0"}
@@ -91,7 +91,7 @@ class ReleaseTest(unittest.TestCase):
             path = directory / f"{artifact}-{self.plan['version']}{suffix}.jar"
             contents = {"README.md": "fixture"}
             if classifier == "sources":
-                contents.update({name: "source fixture" for project, names in release.THIN_SOURCES.items() if project != "backfill" for name in names})
+                contents.update({name: "source fixture" for names in release.THIN_SOURCES.values() for name in names})
             if not classifier:
                 contents.update({
                                         "com/zilliz/spark/connector/Api.class": b"class fixture",
@@ -111,15 +111,15 @@ class ReleaseTest(unittest.TestCase):
         release.stage(self.plan_path, self.inputs, self.output)
         return release.verify(self.output)
 
-    def thin(self, spark_build_version="4.0.0"):
-        directory = self.inputs / "thin-4.0"
+    def thin(self, spark_build_version="4.0.0", line="4.0"):
+        directory = self.inputs / ("thin-" + line)
         modules = []
-        line = next(item for item in self.plan["jvm"] if item["line"] == "4.0")
-        for artifact, (project, internal) in release.thin_graph("4.0", "2.13", "backfill").items():
+        row = next(item for item in self.plan["jvm"] if item["line"] == line)
+        for artifact, (project, internal) in release.thin_graph(line, "2.13", "reader").items():
             runtime = [dict(groupId="com.zilliz", artifactId=name, version=self.plan["version"])
                        for name in internal]
             provided = [dict(groupId="org.apache.spark", artifactId="spark-" + name + "_2.13", version=spark_build_version)
-                        for name in ("core", "sql", "catalyst")] if project in {"spark", "backfill"} else []
+                        for name in ("core", "sql", "catalyst")] if project == "spark" else []
             files = []
             for classifier, extension in sorted(release.MAVEN_FILES):
                 suffix = "-" + classifier if classifier else ""
@@ -141,9 +141,9 @@ class ReleaseTest(unittest.TestCase):
             modules.append(dict(artifactId=artifact, projectId=project, javaRelease=17, files=files,
                                 runtimeDependencies=runtime, providedDependencies=provided))
         release.write_json(directory / "thin-artifacts.json", dict(
-            schemaVersion=1, kind="thin", product="backfill", groupId="com.zilliz", version=self.plan["version"],
-            sourceSha=self.plan["sourceSha"], sparkLine="4.0", sparkVersion=spark_build_version,
-            scalaVersion=line["scala"], scalaBinaryVersion="2.13", modules=modules))
+            schemaVersion=1, kind="thin", product="reader", groupId="com.zilliz", version=self.plan["version"],
+            sourceSha=self.plan["sourceSha"], sparkLine=line, sparkVersion=spark_build_version,
+            scalaVersion=row["scala"], scalaBinaryVersion="2.13", modules=modules))
 
     def thin_only(self):
         self.plan.update(distribution="thin", native=[], jvm=[item for item in self.plan["jvm"] if item["line"] == "4.0"])
@@ -182,7 +182,7 @@ class ReleaseTest(unittest.TestCase):
         # Per native platform: four native files plus four entry files for each
         # of the two lines; three platforms, plus the JVM, universal entry and
         # thin artifacts the platforms share.
-        self.assertEqual(len(manifest["artifacts"]), 72)
+        self.assertEqual(len(manifest["artifacts"]), 68)
         entries = [item for item in manifest["artifacts"] if item["kind"] == "entry" and item["extension"] == "pom"]
         # Per line: one universal entry and one entry per native platform.
         self.assertEqual(len(entries), 2 * (1 + 3))
@@ -206,7 +206,7 @@ class ReleaseTest(unittest.TestCase):
 
         self.rewrite_thin_export(artifact, lambda path: self.modify_pom(path, exclude_arrow))
         manifest = self.stage()
-        self.assertEqual(len(manifest["artifacts"]), 20)
+        self.assertEqual(len(manifest["artifacts"]), 16)
         self.assertEqual({item["kind"] for item in manifest["artifacts"]}, {"thin"})
         for record in manifest["artifacts"]:
             source = self.inputs / "thin-4.0" / record["artifactId"] / Path(record["path"]).name
@@ -227,27 +227,23 @@ class ReleaseTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Thin-only plan"):
             release.validate_plan(invalid)
 
-    def add_reader_export(self):
-        source = self.inputs / "thin-4.0"
-        destination = self.inputs / "reader-4.0"
-        shutil.copytree(source, destination)
-        metadata = json.loads((destination / "thin-artifacts.json").read_text())
-        metadata["product"] = "reader"
-        metadata["modules"] = [module for module in metadata["modules"] if module["projectId"] != "backfill"]
-        shutil.rmtree(destination / "spark-milvus-backfill-4.0_2.13")
-        release.write_json(destination / "thin-artifacts.json", metadata)
-        self.plan["thin"].append(dict(self.plan["thin"][0], product="reader"))
+    def add_line_export(self):
+        """A second line's thin export, which shares the modules below its Spark module."""
+        self.thin(spark_build_version="4.2.0", line="4.2")
+        self.plan["thin"].append({"line": "4.2", "scala": "2.13.16", "spark": "4.2.0", "product": "reader"})
         release.write_json(self.plan_path, self.plan)
-        return destination, metadata
+        directory = self.inputs / "thin-4.2"
+        return directory, json.loads((directory / "thin-artifacts.json").read_text())
 
-    def test_reader_and_backfill_share_one_identical_gav(self):
-        self.add_reader_export()
+    def test_two_lines_share_one_identical_gav_for_their_shared_modules(self):
+        self.add_line_export()
         manifest = self.stage()
+        # Two Spark modules and the three shared modules, four files each.
         self.assertEqual(len([item for item in manifest["artifacts"] if item["kind"] == "thin"]), 20)
-        self.assertEqual({item["product"] for item in manifest["thin"]}, {"reader", "backfill"})
+        self.assertEqual({item["sparkLine"] for item in manifest["thin"]}, {"4.0", "4.2"})
 
-    def test_rehashing_a_shared_product_does_not_allow_conflicting_bytes(self):
-        directory, metadata = self.add_reader_export()
+    def test_rehashing_a_shared_module_does_not_allow_conflicting_bytes(self):
+        directory, metadata = self.add_line_export()
         module = next(item for item in metadata["modules"] if item["projectId"] == "core")
         record = next(item for item in module["files"] if item["classifier"] == "" and item["extension"] == "jar")
         path = directory / record["path"]
@@ -315,7 +311,7 @@ class ReleaseTest(unittest.TestCase):
     def test_thin_pom_cannot_drop_provided_dependency(self):
         artifact = "spark-milvus-4.0-thin_2.13"
         dependencies = [dict(groupId="com.zilliz", artifactId=name, version=self.plan["version"])
-                        for name in release.thin_graph("4.0", "2.13", "backfill")[artifact][1]]
+                        for name in release.thin_graph("4.0", "2.13", "reader")[artifact][1]]
         self.rewrite_thin_export(artifact, lambda path: path.write_bytes(release.pom_bytes(artifact, self.plan, dependencies)))
         with self.assertRaisesRegex(ValueError, "differ from build metadata"):
             self.stage()
@@ -560,7 +556,7 @@ class ReleaseTest(unittest.TestCase):
                 self.output, downloaded, self.DEPLOYMENT, "token")
 
         # Every artifact with its four checksum files.
-        self.assertEqual(len(paths), 72 * 5)
+        self.assertEqual(len(paths), 68 * 5)
         self.assertEqual(manifest, release.verify(downloaded))
 
     def test_upload_is_user_managed_and_keeps_the_token_off_argv(self):
@@ -725,39 +721,22 @@ class ReleaseTest(unittest.TestCase):
                          {"ubuntu-22.04", "ubuntu-24.04", "macos-15"})
         self.assertEqual(set(plan["pins"]), {"milvus-proto", "milvus-storage"})
 
-    def test_release_plan_exports_backfill_for_every_backfill_line(self):
-        output = self.root / "backfill-plan.json"
+    def test_release_plan_exports_the_reader_for_every_source_combination(self):
+        output = self.root / "reader-plan.json"
         release.create_plan("2.0.0-rc.1", output, self.build_matrix)
         plan = json.loads(output.read_text())
-        selections = {product: sorted((row["line"], row["scala"]) for row in plan["thin"]
-                                      if row["product"] == product)
-                      for product in ("reader", "backfill")}
-        self.assertEqual(selections["reader"], [("3.5", "2.12.20"), ("3.5", "2.13.16"), ("4.0", "2.13.16"),
-                                                ("4.1", "2.13.16"), ("4.2", "2.13.16")])
-        self.assertEqual(selections["backfill"], [("4.0", "2.13.16"), ("4.2", "2.13.16")])
-        inventory = release.thin_inventory(plan)
-        for line in release.BACKFILL_LINES:
-            self.assertEqual(inventory[f"spark-milvus-backfill-{line}_2.13"],
-                             ("backfill", (f"spark-milvus-{line}-thin_2.13", "spark-milvus-core_2.13"), line))
-        # A matrix without one backfill line fails instead of dropping its module.
-        matrix = json.loads(self.build_matrix.read_text())
-        matrix["spark"] = [dict(row, line="4.1") if row["line"] == "4.2" else row for row in matrix["spark"]]
-        release.write_json(self.build_matrix, matrix)
-        with self.assertRaisesRegex(ValueError, "one Scala 2.13 combination for each backfill line"):
-            release.create_plan("2.0.0-rc.1", output, self.build_matrix)
+        self.assertEqual({row["product"] for row in plan["thin"]}, {"reader"})
+        self.assertEqual(sorted((row["line"], row["scala"]) for row in plan["thin"]),
+                         [("3.5", "2.12.20"), ("3.5", "2.13.16"), ("4.0", "2.13.16"),
+                          ("4.1", "2.13.16"), ("4.2", "2.13.16")])
+        self.assertFalse(any("backfill" in artifact for artifact in release.thin_inventory(plan)))
 
-    def test_backfill_thin_graph_exists_only_for_backfill_lines(self):
-        for line in ("4.0", "4.2"):
-            with self.subTest(line=line):
-                graph = release.thin_graph(line, "2.13", "backfill")
-                self.assertEqual(graph[f"spark-milvus-backfill-{line}_2.13"],
-                                 ("backfill", (f"spark-milvus-{line}-thin_2.13", "spark-milvus-core_2.13")))
-                self.assertEqual(set(graph) - set(release.thin_graph(line, "2.13", "reader")),
-                                 {f"spark-milvus-backfill-{line}_2.13"})
-        for line, binary in (("3.5", "2.12"), ("3.5", "2.13"), ("4.1", "2.13")):
-            with self.subTest(line=line, binary=binary), \
-                    self.assertRaisesRegex(ValueError, "^Backfill supports Spark 4.0 and 4.2 / Scala 2.13$"):
-                release.thin_graph(line, binary, "backfill")
+    def test_the_reader_is_the_only_thin_product(self):
+        self.assertEqual(set(release.thin_graph("4.2", "2.13", "reader")),
+                         {"spark-milvus-native-runtime", "spark-milvus-native-storage_2.13",
+                          "spark-milvus-core_2.13", "spark-milvus-4.2-thin_2.13"})
+        with self.assertRaisesRegex(ValueError, "^Unknown thin product$"):
+            release.thin_graph("4.0", "2.13", "backfill")
 
     def test_release_plan_takes_versions_from_the_exported_matrix(self):
         rows = [dict(row, spark="4.0.2") if row["line"] == "4.0" else row for row in RELEASE_ROWS]

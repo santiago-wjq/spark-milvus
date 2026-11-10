@@ -144,15 +144,6 @@ jobs:
         env:
           SPARK35_TEST_JAVA_HOME: ${{ steps.test-java.outputs.path }}
         run: python3 scripts/ci/read_validation.py spark --matrix build-matrix.json --line '${{ matrix.line }}' --scala '${{ matrix.scala }}'
-      # Backfill builds on Spark 4.0 and 4.2. The default line's backfill unit
-      # tests run in build-and-test; this lane runs 4.2's. It follows the clean
-      # contract above so that its reports remain for upload.
-      - name: Backfill unit tests and native test compilation
-        if: matrix.line == '4.2'
-        env:
-          SPARK_LINE: ${{ matrix.line }}
-          SCALA_VERSION: ${{ matrix.scala }}
-        run: sbt -batch "-DsparkVersion=$SPARK_LINE" "-DscalaVersion=$SCALA_VERSION" backfill/test backfill/NativeTest/compile
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -258,19 +249,19 @@ jobs:
       - uses: sbt/setup-sbt@v1
 
       - name: Check formatting
-        run: sbt scalafmtCheckAll backfill/NativeTest/scalafmtCheck scalafmtSbtCheck
+        run: sbt scalafmtCheckAll scalafmtSbtCheck
 
       # The selected default line is 4.0. Object-storage integration stays
       # outside the aggregate.
       - name: Compile every module
-        run: sbt 'compile; Test/compile; backfill/NativeTest/compile; integration/Test/compile'
+        run: sbt 'compile; Test/compile; integration/Test/compile'
 
       # Only the default line runs the whole Spark suite. The shared modules'
       # tests on this Scala version, every combination's source packages, POMs
       # and clean contract belong to the exported source matrix jobs. Suites
       # that need the native library cancel when it is absent.
       - name: Spark unit tests
-        run: sbt spark/test backfill/test
+        run: sbt spark/test
 
   shared-native:
     name: Shared native reads (Scala ${{ matrix.scala }})
@@ -360,17 +351,17 @@ jobs:
           MILVUS_READ_IT_OPTIONS: ${{ runner.temp }}/read-storage/a.json
           MILVUS_READ_IT_OPTIONS_B: ${{ runner.temp }}/read-storage/b.json
         run: python3 scripts/ci/read_validation.py integration --matrix build-matrix.json --native-bundle native-input/milvus-native-linux-x86_64.jar
-      # Every backfill line writes and reads back real V3 files, on local
-      # storage and on object storage under a prefix-scoped target identity.
-      - name: Prepare independent backfill input and target identities
-        if: matrix.line == '4.0' || matrix.line == '4.2'
-        run: python3 scripts/ci/input_storage.py start --env-file "$RUNNER_TEMP/backfill-input.env"
-      - name: Require backfill writes, readback and target identity scope
-        if: matrix.line == '4.0' || matrix.line == '4.2'
-        run: python3 scripts/ci/read_validation.py backfill --matrix build-matrix.json --line '${{ matrix.line }}' --native-bundle native-input/milvus-native-linux-x86_64.jar
-      - name: Remove the backfill identity fixture
-        if: always() && (matrix.line == '4.0' || matrix.line == '4.2')
-        run: python3 scripts/ci/input_storage.py stop --env-file "$RUNNER_TEMP/backfill-input.env"
+      # Every line replaces columns of real V3 files and reads them back, on
+      # local storage and on object storage under a prefix-scoped identity.
+      - name: Prepare a prefix-scoped object-storage identity
+        run: python3 scripts/ci/input_storage.py start --env-file "$RUNNER_TEMP/column-write.env"
+      - name: Require column writes, readback and identity scope
+        env:
+          SPARK35_TEST_JAVA_HOME: ${{ steps.test-java.outputs.path }}
+        run: python3 scripts/ci/read_validation.py column-write --matrix build-matrix.json --line '${{ matrix.line }}' --scala '${{ matrix.scala }}' --native-bundle native-input/milvus-native-linux-x86_64.jar
+      - name: Remove the object-storage identity fixture
+        if: always()
+        run: python3 scripts/ci/input_storage.py stop --env-file "$RUNNER_TEMP/column-write.env"
       - name: Remove the isolated input store
         if: always() && matrix.line == '4.0'
         run: python3 scripts/ci/read_storage.py stop --directory "$RUNNER_TEMP/read-storage"
