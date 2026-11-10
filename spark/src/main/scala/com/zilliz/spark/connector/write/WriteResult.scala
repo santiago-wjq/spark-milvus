@@ -385,7 +385,9 @@ object WriteResultRecords {
         value != null && value.isArray,
         s"write result field '$name' must be an array"
       )
-      value.elements().asScala.toSeq
+      // Strict: on Scala 2.12 an iterator's toSeq is a Stream that keeps the
+      // Java iterator, and the receipt's rows are serialized into tasks.
+      value.elements().asScala.toVector
     }
     require(
       text(node, "format") == Format,

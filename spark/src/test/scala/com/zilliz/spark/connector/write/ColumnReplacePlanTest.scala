@@ -1,5 +1,12 @@
 package com.zilliz.spark.connector.write
 
+import java.io.{
+  ByteArrayInputStream,
+  ByteArrayOutputStream,
+  ObjectInputStream,
+  ObjectOutputStream
+}
+
 import org.apache.spark.sql.types.{LongType, StructField, StructType}
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
@@ -235,44 +242,76 @@ class ColumnReplacePlanTest extends AnyFunSuite with Matchers {
     ColumnReplaceDataWriter.statisticFieldId("nodot") shouldBe None
   }
 
-  test("a write result round-trips through its published JSON") {
-    val result = WriteResult(
-      operationId = "op",
-      operation = "replace_columns",
-      createdAt = "2026-11-10T00:00:00Z",
-      committedAt = "2026-11-10T00:01:00Z",
-      applicationId = "app",
-      snapshot =
-        SourceSnapshot("s3://bucket/snapshot.json", 7L, "source", 10L, 3),
-      changedFields = Seq(TargetColumn("score", 101L)),
-      segments = Seq(
-        CommittedSegment(
-          PlannedCommit(
-            30L,
-            20L,
-            "files/insert_log/10/20/30",
-            2L,
-            8L,
-            Seq(
-              ColumnGroupFiles(
-                Seq("101"),
-                Seq("files/insert_log/10/20/30/_data/0_a.parquet"),
-                Seq(8L),
-                "parquet"
-              )
-            )
+  private def committed(segmentId: Long, sourceVersion: Long) =
+    CommittedSegment(
+      PlannedCommit(
+        segmentId,
+        20L,
+        s"files/insert_log/10/20/$segmentId",
+        sourceVersion,
+        8L,
+        Seq(
+          ColumnGroupFiles(
+            Seq("101"),
+            Seq(s"files/insert_log/10/20/$segmentId/_data/0_a.parquet"),
+            Seq(8L),
+            "parquet"
           ),
-          version = 3L
+          ColumnGroupFiles(
+            Seq("102"),
+            Seq(s"files/insert_log/10/20/$segmentId/_data/1_a.parquet"),
+            Seq(8L),
+            "parquet"
+          )
         )
-      )
+      ),
+      version = sourceVersion + 1L
     )
+  private val receipt = WriteResult(
+    operationId = "op",
+    operation = "replace_columns",
+    createdAt = "2026-11-10T00:00:00Z",
+    committedAt = "2026-11-10T00:01:00Z",
+    applicationId = "app",
+    snapshot =
+      SourceSnapshot("s3://bucket/snapshot.json", 7L, "source", 10L, 3),
+    changedFields =
+      Seq(TargetColumn("score", 101L), TargetColumn("embedding", 102L)),
+    segments = Seq(committed(30L, 2L), committed(31L, 5L))
+  )
+  private def published(result: WriteResult): WriteResult =
     WriteResultRecords.parseResult(
       WriteResultRecords.resultNode(result).toString
-    ) shouldBe result
-    val other = WriteResultRecords.resultNode(result).put("record", "failure")
+    )
+  private def javaRoundTrip[T](value: T): T = {
+    val bytes = new ByteArrayOutputStream()
+    val out = new ObjectOutputStream(bytes)
+    try out.writeObject(value)
+    finally out.close()
+    val in = new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray))
+    try in.readObject().asInstanceOf[T]
+    finally in.close()
+  }
+
+  test("a write result round-trips through its published JSON") {
+    published(receipt) shouldBe receipt
+    val other = WriteResultRecords.resultNode(receipt).put("record", "failure")
     intercept[IllegalArgumentException](
       WriteResultRecords.parseResult(other.toString)
     ).getMessage should include("not a write result record")
+  }
+
+  test("the rows of a published receipt can be shipped to executors") {
+    // A receipt read back from JSON is what a write_result scan plans; its
+    // partition is serialized into every task.
+    val partition =
+      WriteResultPartition(WriteResultTable.rows(published(receipt)))
+    partition.rows.map(row => (row.segmentId, row.version)) shouldBe Seq(
+      (30L, 3L),
+      (31L, 6L)
+    )
+    javaRoundTrip(partition) shouldBe partition
+    javaRoundTrip(published(receipt)) shouldBe receipt
   }
 
   test("a write result address resolves like a snapshot path") {
