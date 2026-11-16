@@ -4,3 +4,7 @@
 [submodule "milvus-storage"]
 	path = milvus-storage
 	url = https://github.com/milvus-io/milvus-storage.git
+[submodule "milvus"]
+	path = milvus
+	url = https://github.com/milvus-io/milvus.git
+	update = none
