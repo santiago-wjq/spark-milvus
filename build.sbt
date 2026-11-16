@@ -21,11 +21,22 @@ ThisBuild / version := connectorVersion
 // making Compile resolve or validate the host's native bundle.
 lazy val compileAndRuntime = "compile->compile;runtime->runtime"
 
+// The milvus submodule is opt-in (.gitmodules sets update = none): CI and
+// downstream builds initialize only milvus-proto and milvus-storage. segcore
+// generates its messages from it, so the root aggregates segcore only where it
+// is checked out. sbt loads the build from its root directory.
+lazy val milvusInitialized =
+  (file("milvus") / "pkg" / "proto" / "plan.proto").isFile
+
 // The root is an aggregate only. Select one Spark/Scala combination per sbt
 // invocation; publication exports its complete JVM implementation, not modules.
 lazy val root = project
   .in(file("."))
-  .aggregate(nativeRuntime, nativeStorage, core, spark)
+  .aggregate(
+    Seq[ProjectReference](nativeRuntime, nativeStorage, core, spark) ++
+      (if (milvusInitialized) Seq[ProjectReference](segcore)
+       else Seq.empty): _*
+  )
   .settings(
     name := "spark-milvus",
     ReadValidation.matrixSettings,
@@ -175,6 +186,78 @@ lazy val core = project
     Compile / PB.generate / includeFilter := "common.proto" | "schema.proto",
     Compile / PB.targets := Seq(
       scalapb.gen(grpc = false) -> (Compile / sourceManaged).value / "scalapb"
+    )
+  )
+
+// segcore's installed libraries, where native/segcore/build/build.py puts them.
+lazy val segcoreLibraryDir = Def.setting(
+  (ThisBuild / baseDirectory).value / "milvus" / "internal" / "core" / "output" / "lib"
+)
+
+// Unpublished and test-only, outside the production layers: segcore's JNI
+// bindings, the planpb and segcorepb messages built from core's predicates and
+// read model, and the suites comparing segcore with core's evaluator. Nothing
+// depends on it, and the root aggregates it only beside the milvus submodule.
+// See native/segcore/README.md.
+lazy val segcore = Project("segcore", file("native/segcore"))
+  .dependsOn(core % s"$compileAndRuntime;test->test")
+  .settings(
+    name := "segcore",
+    moduleName := "spark-milvus-segcore",
+    Modules.sparkFreeModuleSettings,
+    Modules.jacksonPin,
+    publish / skip := true,
+    libraryDependencies ++= Seq(
+      scalapbRuntime % "protobuf",
+      scalaTest % Test
+    ) ++ Seq("arrow-vector", "arrow-memory-core", "arrow-memory-netty").map(
+      "org.apache.arrow" % _ % Versions.line("4.0").arrow % Test
+    ),
+    // Milvus's plan and segcore messages and every file they import, generated
+    // unchanged from both submodules; schema.proto and common.proto come from
+    // core's classes. No service stubs.
+    Compile / PB.protoSources := Seq(
+      (ThisBuild / baseDirectory).value / "milvus" / "pkg" / "proto",
+      milvusProtoDir.value
+    ),
+    Compile / PB.generate / includeFilter :=
+      "plan.proto" | "segcore.proto" | "index_coord.proto" | "internal.proto" |
+        "milvus.proto" | "rg.proto" | "feder.proto" | "msg.proto",
+    Compile / PB.targets := Seq(
+      scalapb.gen(grpc = false) -> (Compile / sourceManaged).value / "scalapb"
+    ),
+    Compile / PB.generate := (Compile / PB.generate)
+      .dependsOn(Def.task {
+        require(
+          milvusInitialized,
+          "Initialize the milvus submodule before building segcore: git submodule update --init --checkout milvus"
+        )
+      })
+      .value,
+    inConfig(Test)(Modules.nativeTest),
+    // The suites load the segcore build's libraries and never the public
+    // bundle: libmilvus_core links a milvus-storage and dependencies of its
+    // own, which must not share a process with the bundle's. HotSpot checks
+    // every JNI call, and every symbol binds at load, as native acceptance
+    // requires.
+    Test / fullClasspath := (Test / fullClasspath).value.filterNot(entry =>
+      NativeBundle.selected.exists(
+        _.getAbsoluteFile == entry.data.getAbsoluteFile
+      )
+    ),
+    Test / javaOptions := {
+      val library = segcoreLibraryDir.value.getAbsolutePath
+      (Test / javaOptions).value.filterNot(
+        _.startsWith("-Djava.library.path=")
+      ) ++ Seq(
+        "-Xcheck:jni",
+        s"-Djava.library.path=$library",
+        s"-Dmilvus.segcore.lib=$library"
+      )
+    },
+    Test / envVars := (Test / envVars).value ++ Map(
+      "LD_LIBRARY_PATH" -> segcoreLibraryDir.value.getAbsolutePath,
+      "LD_BIND_NOW" -> "1"
     )
   )
 

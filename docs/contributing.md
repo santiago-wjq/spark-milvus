@@ -14,7 +14,11 @@ module `target` directories. Native compilation uses the host architecture.
 
 Production projects are `native-runtime`, `native-storage`, `core` and `spark`.
 The first two live under `native/`. `integration` stays outside the root
-aggregate. Profiles support 3.5 (Scala 2.12/2.13), 4.0, 4.1 and 4.2.
+aggregate. `segcore`, in `native/segcore`, is unpublished and test-only; the
+root aggregates it only when the `milvus` submodule is initialized
+(`git submodule update --init --checkout milvus`). Its
+[README](../native/segcore/README.md) describes its native build. Profiles
+support 3.5 (Scala 2.12/2.13), 4.0, 4.1 and 4.2.
 
 ```bash
 sbt core/test spark/compile
@@ -217,6 +221,9 @@ filters, ignored tests or cancellation conditions to make the run pass.
 Existing native-library cancellation conditions remain part of the test setup;
 report them and the actual counts as described in
 [Tests that need the native library](#tests-that-need-the-native-library).
+With the `milvus` submodule initialized, the root run includes `segcore`, whose
+native suites cancel unless `native/segcore/build/build.py` has installed the
+segcore libraries; its test JVM never sees the platform bundle.
 The root run does not include `integration/test`; its V3 read suite requires a
 real object store. Additional Scala
 cross-version checks, integration tests, native
@@ -240,7 +247,11 @@ exercise their request/response checks without requiring a production service.
 
 Only `common.proto` and `schema.proto` are generated into `core`, with
 `grpc = false`, because snapshots embed the protobuf `CollectionSchema`.
-Public builds generate no Milvus service stubs.
+Public builds generate no Milvus service stubs. `segcore` generates the
+messages segcore takes from the `milvus` submodule's `pkg/proto`, `plan.proto`,
+`segcore.proto` and the Milvus files they import, and the `milvus-proto` files
+those import besides the two above, whose classes it takes from `core`; also
+with `grpc = false`. A move of either gitlink changes them in the same commit.
 
 ## Jackson
 

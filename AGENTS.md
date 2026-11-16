@@ -33,7 +33,11 @@ Four production modules, with dependencies only pointing downward.
 
 Layer-1 modules live in `native/runtime` and `native/storage`; `native/build`
 produces the Storage-only platform bundle. The root aggregates production modules
-and publishes no artifact. `integration` is outside the aggregate. The column
+and publishes no artifact. `integration` is outside the aggregate. `segcore`
+(`native/segcore`) is an unpublished, test-only module outside these layers:
+Milvus's segcore through JNI, depending on `core`, with nothing depending on it.
+The root aggregates it only where the opt-in `milvus` submodule is initialized;
+see [native/segcore/README.md](native/segcore/README.md). The column
 replacement reads no input itself: callers pass a DataFrame, and there is no
 command-line entry point. Sources support Spark 3.5 (Scala 2.12 or 2.13), 4.0,
 4.1 and 4.2. `-DsparkVersion` and
@@ -41,8 +45,9 @@ command-line entry point. Sources support Spark 3.5 (Scala 2.12 or 2.13), 4.0,
 outputs when switching profiles. Formatting and package checks inspect every
 retained shim root.
 
-Initialize the `milvus-proto` and `milvus-storage` submodules before building.
-Only common/schema protobufs are generated; no service protocol is generated.
+Initialize the `milvus-proto` and `milvus-storage` submodules before building;
+only `segcore` needs `milvus`. Production modules generate only common/schema
+protobufs, and no module generates a service protocol.
 Use `spark/assembly` for a bundle. Keep Iceberg and input formats out of its
 closure.
 
