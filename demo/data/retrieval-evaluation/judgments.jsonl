@@ -1,0 +1,11 @@
+{"query_id": "q1", "entity_id": 3003, "relevant": 1}
+{"query_id": "q1", "entity_id": 3004, "relevant": 1}
+{"query_id": "q1", "entity_id": 3000, "relevant": 0}
+{"query_id": "q2", "entity_id": 3000, "relevant": 0}
+{"query_id": "q2", "entity_id": 3003, "relevant": 0}
+{"query_id": "q2", "entity_id": 3100, "relevant": 1}
+{"query_id": "q2", "entity_id": 3102, "relevant": 1}
+{"query_id": "q3", "entity_id": 3002, "relevant": 1}
+{"query_id": "q3", "entity_id": 3101, "relevant": 1}
+{"query_id": "q3", "entity_id": 3001, "relevant": 0}
+{"query_id": "q4", "entity_id": 3102, "relevant": 1}

@@ -1,7 +1,12 @@
 # Spark-Milvus examples
 
-These examples cover reading Collection data and updating existing field values
-with Spark. For writes, start with [Column replacement](#column-replacement).
+Start with [Evaluate product search results](retrieval-evaluation.md) for a
+complete analysis workflow: combine ranked search results, relevance judgments
+and Collection metadata to measure retrieval quality and investigate problems.
+It produces per-query metrics and reports without modifying the Collection.
+
+The examples below explain individual read operations. For writes, start with
+[Column replacement](#column-replacement).
 
 The runnable reader examples below use existing Storage V3 snapshots with
 Spark 4.0.1, Scala 2.13 and Java 21. The committed sample includes 14 visible

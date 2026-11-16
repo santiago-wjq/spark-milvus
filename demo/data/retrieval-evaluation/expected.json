@@ -1,0 +1,48 @@
+{
+  "per_query": [
+    {
+      "query_id": "q1",
+      "returned_hits": 3,
+      "relevant_hits": 2,
+      "relevant_total": 2,
+      "precision_at_k": 0.6666666666666666,
+      "recall_at_k": 1.0,
+      "reciprocal_rank_at_k": 1,
+      "unmatched_collection_hits": 0,
+      "unmatched_catalog_hits": 0
+    },
+    {
+      "query_id": "q2",
+      "returned_hits": 3,
+      "relevant_hits": 1,
+      "relevant_total": 2,
+      "precision_at_k": 0.3333333333333333,
+      "recall_at_k": 0.5,
+      "reciprocal_rank_at_k": 0.3333333333333333,
+      "unmatched_collection_hits": 0,
+      "unmatched_catalog_hits": 0
+    },
+    {
+      "query_id": "q3",
+      "returned_hits": 3,
+      "relevant_hits": 2,
+      "relevant_total": 2,
+      "precision_at_k": 0.6666666666666666,
+      "recall_at_k": 1.0,
+      "reciprocal_rank_at_k": 1,
+      "unmatched_collection_hits": 1,
+      "unmatched_catalog_hits": 1
+    },
+    {
+      "query_id": "q4",
+      "returned_hits": 0,
+      "relevant_hits": 0,
+      "relevant_total": 1,
+      "precision_at_k": 0.0,
+      "recall_at_k": 0.0,
+      "reciprocal_rank_at_k": 0,
+      "unmatched_collection_hits": 0,
+      "unmatched_catalog_hits": 0
+    }
+  ]
+}
