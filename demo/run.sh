@@ -15,6 +15,7 @@ Run one example on Linux with Spark 4.0 / Scala 2.13 and Java 21:
   01_read_snapshot.py        ReadSnapshot        Read snapshot schema and rows
   02_filter_project.py       FilterProject       Filter rows and select columns
   03_sql_analytics.py        SqlAnalytics        Query with Spark SQL
+  04_retrieval_evaluation.py (Python only)       Evaluate exported retrieval results
   08_partition_selection.py  PartitionSelection  Select snapshot partitions
 
 The Python .py suffix is optional. For example-specific arguments:
@@ -54,7 +55,7 @@ shift
 if [[ "$LANGUAGE" == python ]]; then
   EXAMPLE="${EXAMPLE%.py}.py"
   case "$EXAMPLE" in
-    00_snapshot_path.py|01_read_snapshot.py|02_filter_project.py|03_sql_analytics.py|08_partition_selection.py) ;;
+    00_snapshot_path.py|01_read_snapshot.py|02_filter_project.py|03_sql_analytics.py|04_retrieval_evaluation.py|08_partition_selection.py) ;;
     *) echo "Unknown Python example: $EXAMPLE. Run ./demo/run.sh --help." >&2; exit 1 ;;
   esac
   test -f "$SCRIPT_DIR/python/$EXAMPLE" || {

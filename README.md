@@ -24,6 +24,14 @@ to identify inconsistent descriptions, and write back corrected values.
 Your application controls when those updates are submitted to Milvus
 and become visible to online queries.
 
+For a runnable analysis workflow, try the
+[product search evaluation demo](demo/retrieval-evaluation.md). It combines
+search results exported by Milvus or your application with relevance labels,
+Collection data and a product catalog to measure retrieval quality and
+identify irrelevant hits, queries with no results and missing metadata.
+The guide includes sample data, expected reports and instructions for
+evaluating your own search results.
+
 To get started, [add the dependency](#installing), follow the
 [read](#reading-collection-data) and [write](#writing-collection-data) examples,
 then [run your application](docs/application-development.md#running-your-application).
@@ -316,7 +324,7 @@ joining external updates, permissions and failure recovery.
 |---|---|
 | [Application development](docs/application-development.md) | Running applications, resolving JARs and building the connector from source |
 | [Reference](docs/reference.md) | Supported options, defaults, storage credentials and data types |
-| [Examples](demo/README.md) | Collection reads, SQL and column replacement |
+| [Examples](demo/README.md) | Product search evaluation, Collection reads, SQL and column replacement |
 | [Cluster setup](docs/cluster-setup.md) | Driver and executor permissions, networking and native runtime |
 | [Release artifacts](docs/release-artifacts.md) | Published Maven coordinates, package choices and platform support |
 | [3.0.0 release notes](https://github.com/zilliztech/spark-milvus/releases/tag/v3.0.0) | Released capabilities and migration from earlier versions |

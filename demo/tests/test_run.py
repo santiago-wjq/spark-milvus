@@ -14,7 +14,8 @@ from zipfile import ZipFile
 ROOT = Path(__file__).resolve().parents[2]
 LAUNCHER = ROOT / "demo/run.sh"
 EXAMPLES = (
-    "01_read_snapshot.py", "02_filter_project.py", "03_sql_analytics.py", "08_partition_selection.py",
+    "01_read_snapshot.py", "02_filter_project.py", "03_sql_analytics.py",
+    "04_retrieval_evaluation.py", "08_partition_selection.py",
 )
 JAVA_EXAMPLES = (
     "ReadSnapshot", "FilterProject", "SqlAnalytics", "PartitionSelection",
